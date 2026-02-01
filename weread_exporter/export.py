@@ -189,6 +189,31 @@ class WeReadExporter(object):
         # Generate PDF
         html.write_pdf(save_path, stylesheets=css)
 
+    async def export_markdown_files(self, output_dir):
+        import shutil
+
+        if not os.path.isdir(output_dir):
+            os.makedirs(output_dir)
+
+        # Copy chapters
+        dest_chapters = os.path.join(output_dir, "chapters")
+        if os.path.exists(dest_chapters):
+            shutil.rmtree(dest_chapters)
+        shutil.copytree(self._chapter_dir, dest_chapters)
+
+        # Copy images
+        dest_images = os.path.join(output_dir, "images")
+        if os.path.exists(dest_images):
+            shutil.rmtree(dest_images)
+        shutil.copytree(self._image_dir, dest_images)
+
+        # Copy meta.json
+        shutil.copy(self._meta_path, output_dir)
+
+        # Copy cover.jpg if exists
+        if os.path.isfile(self._cover_image_path):
+            shutil.copy(self._cover_image_path, output_dir)
+
     async def markdown_to_epub(self, save_path, extra_css=None):
         meta_data = await self._load_meta_data()
         book = epub.EpubBook()
