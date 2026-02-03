@@ -1,0 +1,58 @@
+Traceback (most recent call last):
+  File "/home/yj/workplace/opensource/weread-exporter/weread_exporter/__main__.py", line 199, in main
+    loop.run_until_complete(async_main())
+  File "/home/yj/.pyenv/versions/3.12.3/lib/python3.12/asyncio/base_events.py", line 674, in run_until_complete
+    self.run_forever()
+  File "/home/yj/.pyenv/versions/3.12.3/lib/python3.12/asyncio/base_events.py", line 641, in run_forever
+    self._run_once()
+  File "/home/yj/.pyenv/versions/3.12.3/lib/python3.12/asyncio/base_events.py", line 1987, in _run_once
+    handle._run()
+  File "/home/yj/.pyenv/versions/3.12.3/lib/python3.12/asyncio/events.py", line 88, in _run
+    self._context.run(self._callback, *self._args)
+  File "/home/yj/workplace/opensource/weread-exporter/weread_exporter/__main__.py", line 79, in async_main
+    args = parser.parse_args()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/yj/.pyenv/versions/3.12.3/lib/python3.12/argparse.py", line 1896, in parse_args
+    args, argv = self.parse_known_args(args, namespace)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yj/.pyenv/versions/3.12.3/lib/python3.12/argparse.py", line 1929, in parse_known_args
+    namespace, args = self._parse_known_args(args, namespace)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yj/.pyenv/versions/3.12.3/lib/python3.12/argparse.py", line 2150, in _parse_known_args
+    start_index = consume_optional(start_index)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yj/.pyenv/versions/3.12.3/lib/python3.12/argparse.py", line 2090, in consume_optional
+    take_action(action, args, option_string)
+  File "/home/yj/.pyenv/versions/3.12.3/lib/python3.12/argparse.py", line 2005, in take_action
+    action(self, namespace, argument_values, option_string)
+  File "/home/yj/.pyenv/versions/3.12.3/lib/python3.12/argparse.py", line 1145, in __call__
+    parser.exit()
+  File "/home/yj/.pyenv/versions/3.12.3/lib/python3.12/argparse.py", line 2652, in exit
+    _sys.exit(status)
+SystemExit: 0
+usage: weread-exporter [-h] -b BOOK_ID [-o {md,epub,pdf,mobi,txt}]
+                       [--load-timeout LOAD_TIMEOUT]
+                       [--load-interval LOAD_INTERVAL] [--css-file CSS_FILE]
+                       [--headless] [--force-login] [--use-default-profile]
+                       [--mock-user-agent] [--proxy-server PROXY_SERVER]
+
+WeRead book export cmdline tool
+
+options:
+  -h, --help            show this help message and exit
+  -b BOOK_ID, --book-id BOOK_ID
+                        book id
+  -o {md,epub,pdf,mobi,txt}, --output-format {md,epub,pdf,mobi,txt}
+                        output file format
+  --load-timeout LOAD_TIMEOUT
+                        load chapter page timeout
+  --load-interval LOAD_INTERVAL
+                        load chapter page interval time
+  --css-file CSS_FILE   overide default css style
+  --headless            chrome headless
+  --force-login         force login first
+  --use-default-profile
+                        use default profile
+  --mock-user-agent     use mock user-agent
+  --proxy-server PROXY_SERVER
+                        http proxy server, e.g. http://127.0.0.1:8888

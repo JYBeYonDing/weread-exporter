@@ -6,7 +6,7 @@ html {
     background: var(--alice-bg-color);
     color: var(--alice-font-color);
     font-size: 14px;
-    font-family: "Helvetica";
+    font-family: "Helvetica", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif;
 }
 
 h1 {
@@ -102,7 +102,7 @@ h3,
 h4,
 h5,
 h6 {
-    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-family: "Helvetica Neue", Helvetica, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif;
 }
 
 h2,
@@ -188,7 +188,7 @@ table>tbody+tbody {
     border-top: 2px solid var(--alice-font-color);
 }
 
-.page-break  {
-    display:block;
-    page-break-before:always;
+.page-break {
+    display: block;
+    page-break-before: always;
 }
