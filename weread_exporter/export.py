@@ -11,6 +11,11 @@ import markdown
 from ebooklib import epub
 from weasyprint import HTML, CSS
 
+try:
+    import pyppeteer.errors as _pyppeteer_errors
+except ImportError:
+    _pyppeteer_errors = None
+
 from . import utils
 
 current_path = os.path.dirname(os.path.abspath(__file__))
@@ -355,16 +360,16 @@ class WeReadExporter(object):
             )
 
             time0 = 0
-            for _ in range(3):
+            chapter_done = False
+            for attempt in range(3):
                 time0 = time.time()
                 try:
-                    await asyncio.wait_for(
-                        self._page.goto_chapter(
-                            chapter["id"],
-                            timeout=timeout,
-                        ),
-                        timeout=timeout + 60,
-                    )  # avoid pyppeteer hangs
+                    # No hard outer timeout — _check_next_page handles per-page timeouts internally.
+                    # A hard cap here caused multi-page chapters (8+ pages) to time out prematurely.
+                    await self._page.goto_chapter(
+                        chapter["id"],
+                        timeout=timeout,
+                    )
                 except asyncio.TimeoutError:
                     logging.warning(
                         "[%s] Load chapter %s timeout %ds"
@@ -374,20 +379,48 @@ class WeReadExporter(object):
                             time.time() - time0,
                         )
                     )
+                    # Write placeholder BEFORE raising so it is skipped on the next browser restart
+                    with open(file_path, "wb") as fp:
+                        fp.write(b"<!-- load failed: timeout -->")
                     raise utils.LoadChapterFailedError()
                 except KeyboardInterrupt as ex:
                     raise ex
-                except:
+                except Exception as ex:
+                    err_msg = str(ex)
+                    # Detect a dead browser session — no point retrying with the same dead browser
+                    is_browser_dead = (
+                        _pyppeteer_errors
+                        and isinstance(ex, _pyppeteer_errors.NetworkError)
+                        and ("Session closed" in err_msg or "Target closed" in err_msg)
+                    )
+                    if is_browser_dead:
+                        logging.warning(
+                            "[%s] Browser session died on chapter %s (attempt %d), "
+                            "writing placeholder and requesting browser restart"
+                            % (self.__class__.__name__, chapter["title"], attempt + 1)
+                        )
+                        # Write placeholder BEFORE raising — ensures chapter is skipped next restart
+                        with open(file_path, "wb") as fp:
+                            fp.write(b"<!-- load failed: browser died -->")
+                        raise utils.LoadChapterFailedError(
+                            "Browser session closed during chapter %s" % chapter["title"]
+                        )
                     logging.exception(
-                        "[%s] Go to chapter %s failed"
-                        % (self.__class__.__name__, chapter["title"])
+                        "[%s] Go to chapter %s failed (attempt %d/3)"
+                        % (self.__class__.__name__, chapter["title"], attempt + 1)
                     )
                 else:
+                    chapter_done = True
                     break
-            else:
-                raise utils.LoadChapterFailedError(
-                    "Load chapter %s failed" % chapter["title"]
+
+            if not chapter_done:
+                logging.warning(
+                    "[%s] Load chapter %s failed after 3 retries, writing placeholder and skipping"
+                    % (self.__class__.__name__, chapter["title"])
                 )
+                with open(file_path, "wb") as fp:
+                    fp.write(b"<!-- load failed: max retries -->")
+                continue
 
             markdown = await self._page.get_markdown()
             logging.info(

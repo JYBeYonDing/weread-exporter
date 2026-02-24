@@ -109,7 +109,8 @@ async def async_main():
         if not os.path.isdir(output_dir):
             os.mkdir(output_dir)
         exporter = export.WeReadExporter(page, save_path)
-        while True:
+        max_retries = 10
+        for retry_count in range(max_retries):
             try:
                 await page.launch(
                     headless=args.headless,
@@ -126,11 +127,20 @@ async def async_main():
             try:
                 await exporter.export_markdown(args.load_timeout, args.load_interval)
             except utils.LoadChapterFailedError:
-                logging.warning("Load chapter failed, close browser and retry")
+                logging.warning(
+                    "Load chapter failed (retry %d/%d), close browser and retry"
+                    % (retry_count + 1, max_retries)
+                )
                 await page.close()
             else:
                 await page.close()
                 break
+        else:
+            logging.error(
+                "Book %s export failed after %d retries, giving up" % (book_id, max_retries)
+            )
+            await page.close()
+            continue
 
         await exporter.pre_process_markdown()
         title = await exporter.get_book_title()

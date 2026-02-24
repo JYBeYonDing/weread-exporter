@@ -187,6 +187,9 @@ class WeReadWebPage(object):
         logging.info("[%s] Launch url %s" % (self.__class__.__name__, self._home_url))
         chrome = self._check_chrome()
         args = ["--no-first-run", "--remote-allow-origins=*"]
+        if sys.platform == "linux":
+            # Avoid Chrome crashes caused by /dev/shm being too small (common on Linux)
+            args.append("--disable-dev-shm-usage")
         if headless:
             args.append("--headless")
             if sys.platform == "linux" and os.getuid() == 0:
@@ -568,14 +571,15 @@ class WeReadWebPage(object):
                 raise RuntimeError("Wait for creating markdown timeout")
         return result
 
-    async def _check_next_page(self):
+    async def _check_next_page(self, page_timeout=30):
+        """page_timeout: seconds to wait per page for the footer button."""
         while True:
             try:
                 await self.wait_for_selector(
-                    "button.readerFooter_button", timeout=60000
+                    "button.readerFooter_button", timeout=page_timeout * 1000
                 )
             except pyppeteer.errors.TimeoutError:
-                logging.info("[%s] load selector timeout " % self.__class__.__name__)
+                logging.info("[%s] Footer button not found after %ds, stop" % (self.__class__.__name__, page_timeout))
                 break
             result = await self._page.evaluate(
                 "document.getElementsByClassName('readerFooter_button')[0].innerText;"
@@ -588,12 +592,17 @@ class WeReadWebPage(object):
                 await self.pre_load_page()
                 await self._page.click("button.readerFooter_button")
                 await asyncio.sleep(1)
-            elif result == "下一章":
+            elif result in ("下一章", "全书已读完", "全书完", "标记读完", "已读完所有章节"):
+                logging.info("[%s] Chapter end: %r" % (self.__class__.__name__, result))
                 break
             elif result.startswith("登录"):
                 raise utils.LoginRequiredError()
             else:
-                raise NotImplementedError(result)
+                logging.warning(
+                    "[%s] Unknown footer button: %r, treating as chapter end"
+                    % (self.__class__.__name__, result)
+                )
+                break
 
     def _get_chapter_url(self, chapter_id):
         return "%s%sk%s" % (
@@ -608,8 +617,10 @@ class WeReadWebPage(object):
         await self.pre_load_page()
         self._url = self._get_chapter_url(chapter_id)
         await self._page.goto(self._url, timeout=1000 * timeout)
+        # page_timeout per page: stay well within outer timeout while allowing slow pages
+        page_timeout = max(20, timeout - 10)
         try:
-            await self._check_next_page()
+            await self._check_next_page(page_timeout=page_timeout)
         except utils.LoginRequiredError:
             await self.login()
             return await self.goto_chapter(chapter_id, timeout=timeout)
