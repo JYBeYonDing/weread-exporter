@@ -102,11 +102,20 @@ class WeReadExporter(object):
             output += "\n"
             pos = 0
             while pos >= 0:
-                pos = output.find("](https://", pos)
+                pos = output.find("](", pos)
                 if pos < 0:
                     break
                 pos1 = output.find(")", pos)
+                if pos1 < 0:
+                    break
                 url = output[pos + 2 : pos1]
+                if url.startswith("data:"):
+                    # data: URI 占位图（如 1x1 gif）不是真实图片，直接移除
+                    output = output[:pos] + output[pos1 + 1 :]
+                    continue
+                if not url.startswith("https://"):
+                    pos += 2
+                    continue
                 logging.info("[%s] Replace image %s" % (self.__class__.__name__, url))
                 try:
                     data = await utils.fetch(url)
@@ -170,11 +179,16 @@ class WeReadExporter(object):
         if image_format == "png":
             soup = bs4.BeautifulSoup(raw_html, features="html.parser")
             for img in soup.find_all("img"):
-                src = os.path.join(self._save_dir, img.attrs["src"])
+                src_attr = img.attrs.get("src", "")
+                if src_attr.startswith("data:"):
+                    # data: URI 占位图不是本地文件，直接删除该 img
+                    img.decompose()
+                    continue
+                src = os.path.join(self._save_dir, src_attr)
                 if not src.endswith(".png"):
                     png_path = src[:-3] + "png"
                     utils.save_to_png(src, png_path)
-                    img.attrs["src"] = img.attrs["src"][:-3] + "png"
+                    img.attrs["src"] = src_attr[:-3] + "png"
 
             raw_html = soup.prettify()
 
@@ -372,17 +386,15 @@ class WeReadExporter(object):
                     )
                 except asyncio.TimeoutError:
                     logging.warning(
-                        "[%s] Load chapter %s timeout %ds"
+                        "[%s] Load chapter %s timeout %ds (attempt %d/3)"
                         % (
                             self.__class__.__name__,
                             chapter["title"],
                             time.time() - time0,
+                            attempt + 1,
                         )
                     )
-                    # Write placeholder BEFORE raising so it is skipped on the next browser restart
-                    with open(file_path, "wb") as fp:
-                        fp.write(b"<!-- load failed: timeout -->")
-                    raise utils.LoadChapterFailedError()
+                    # Retry in-process first; placeholder is written only after 3 failures.
                 except KeyboardInterrupt as ex:
                     raise ex
                 except Exception as ex:
@@ -396,12 +408,9 @@ class WeReadExporter(object):
                     if is_browser_dead:
                         logging.warning(
                             "[%s] Browser session died on chapter %s (attempt %d), "
-                            "writing placeholder and requesting browser restart"
+                            "requesting browser restart"
                             % (self.__class__.__name__, chapter["title"], attempt + 1)
                         )
-                        # Write placeholder BEFORE raising — ensures chapter is skipped next restart
-                        with open(file_path, "wb") as fp:
-                            fp.write(b"<!-- load failed: browser died -->")
                         raise utils.LoadChapterFailedError(
                             "Browser session closed during chapter %s" % chapter["title"]
                         )

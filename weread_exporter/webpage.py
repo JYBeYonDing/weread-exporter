@@ -36,6 +36,7 @@ class WeReadWebPage(object):
         self._chapter_root_url = self.__class__.root_url + "/web/reader/"
         self._browser = None
         self._page = None
+        self._request_interception_ready = False
         self._load_cookie()
         self._url = ""
 
@@ -104,32 +105,47 @@ class WeReadWebPage(object):
             raise RuntimeError("Get user info failed: %s" % rsp)
         return rsp
 
+    def _parse_cookie_string(self, cookie):
+        """Parse browser cookie string like `k1=v1; k2=v2` into a dict."""
+        cookie_map = {}
+        for it in cookie.split(";"):
+            it = it.strip()
+            if not it or "=" not in it:
+                continue
+            key, value = it.split("=", 1)
+            key = key.strip()
+            if key:
+                cookie_map[key] = value.strip()
+        return cookie_map
+
     def _load_cookie(self):
+        """Load cookies from txt file as browser cookie string (or legacy JSON)."""
         self._cookie = {}
         if not os.path.isfile(self._cookie_path):
             return
-        with open(self._cookie_path) as fp:
-            cookie = fp.read()
-            try:
-                cookie = json.loads(cookie)
-            except:
-                for it in cookie.split(";"):
-                    it = it.strip()
-                    if "=" not in it:
-                        continue
-                    key, value = it.split("=")
-                    self._cookie[key] = value
+        with open(self._cookie_path, encoding="utf-8") as fp:
+            cookie = fp.read().strip()
+        if not cookie:
+            return
+        try:
+            cookie_obj = json.loads(cookie)
+        except ValueError:
+            self._cookie = self._parse_cookie_string(cookie)
+        else:
+            if isinstance(cookie_obj, dict):
+                self._cookie = {str(key): str(cookie_obj[key]) for key in cookie_obj}
             else:
-                for key in cookie:
-                    self._cookie[key] = cookie[key]
+                self._cookie = self._parse_cookie_string(cookie)
 
     def _save_cookie(self):
+        """Save cookies to txt file as browser cookie string."""
         if not self._cookie_path:
             return
-        with open(self._cookie_path, "w") as fp:
-            fp.write(json.dumps(self._cookie))
+        with open(self._cookie_path, "w", encoding="utf-8") as fp:
+            fp.write(self._format_cookie())
 
     def _format_cookie(self, cookie=""):
+        """Format cookie dict as browser cookie header string."""
         cookies = []
         if cookie:
             cookies.append(cookie)
@@ -154,6 +170,7 @@ class WeReadWebPage(object):
         return True
 
     def _check_chrome(self):
+        """Locate Chrome executable from PATH or common install locations."""
         path_list = os.environ["PATH"].split(";" if sys.platform == "win32" else ":")
         for chrome in ("chrome", "google-chrome"):
             if sys.platform == "win32":
@@ -166,6 +183,18 @@ class WeReadWebPage(object):
             chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
             if os.path.isfile(chrome):
                 return chrome
+
+        if sys.platform == "win32":
+            local_app_data = os.environ.get("LOCALAPPDATA", "")
+            program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+            program_files_x86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+            for chrome in (
+                os.path.join(program_files, "Google", "Chrome", "Application", "chrome.exe"),
+                os.path.join(program_files_x86, "Google", "Chrome", "Application", "chrome.exe"),
+                os.path.join(local_app_data, "Google", "Chrome", "Application", "chrome.exe"),
+            ):
+                if chrome and os.path.isfile(chrome):
+                    return chrome
 
         if sys.platform == "win32":
             command = "where chrome"
@@ -268,6 +297,7 @@ class WeReadWebPage(object):
             }
         )
         if self._cookie.get("wr_vid"):
+            logging.info("[%s] Checking login user info" % self.__class__.__name__)
             try:
                 user_info = await self.get_user_info()
             except utils.InvalidUserError as ex:
@@ -275,6 +305,11 @@ class WeReadWebPage(object):
                     "[%s] Get user error: %s" % (self.__class__.__name__, ex)
                 )
                 self._cookie = {}
+            except Exception as ex:
+                logging.warning(
+                    "[%s] Get user info failed, continue with cookie: %s"
+                    % (self.__class__.__name__, ex)
+                )
             else:
                 logging.info(
                     "[%s] Current login user is %s"
@@ -283,18 +318,22 @@ class WeReadWebPage(object):
         if self._cookie:
             await self._inject_cookie()
 
+        logging.info("[%s] Opening home page %s" % (self.__class__.__name__, self._home_url))
         await self._page.goto(self._home_url)
         # await self.wait_for_selector("div.readerFooter a")
         if force_login:
             await self.login()
         if self._cookie:
+            logging.info("[%s] Waiting for avatar" % self.__class__.__name__)
             await self.wait_for_avatar()
         self._page.on("console", self.handle_log)
 
     async def close(self):
+        """Close browser and reset page-related state."""
         if self._browser:
             await self._browser.close()
             self._browser = self._page = None
+            self._request_interception_ready = False
 
     async def get_html(self):
         return await self._page.evaluate("document.documentElement.outerHTML;")
@@ -302,28 +341,36 @@ class WeReadWebPage(object):
     async def screenshot(self, save_path):
         await self._page.screenshot({"path": save_path})
 
-    async def wait_for_selector(self, selector, timeout=30):
+    async def wait_for_selector(self, selector, timeout=30, dump_on_timeout=True):
+        """Wait for CSS selector. timeout is milliseconds (pyppeteer convention)."""
         try:
             return await self._page.waitForSelector(selector, timeout=timeout)
         except pyppeteer.errors.TimeoutError as ex:
-            html = await self.get_html()
-            html_path = "webpage.html"
-            with open(html_path, "wb") as fp:
-                if not isinstance(html, bytes):
-                    html = html.encode("utf8")
-                fp.write(html)
-            logging.info(
-                "[%s] Current html saved to %s" % (self.__class__.__name__, html_path)
-            )
-            screenshot_path = "screenshot.jpg"
-            await self.screenshot(screenshot_path)
-            logging.info(
-                "[%s] Current screenshot saved to %s"
-                % (self.__class__.__name__, screenshot_path)
-            )
+            if dump_on_timeout:
+                html = await self.get_html()
+                html_path = "webpage.html"
+                with open(html_path, "wb") as fp:
+                    if not isinstance(html, bytes):
+                        html = html.encode("utf8")
+                    fp.write(html)
+                logging.info(
+                    "[%s] Current html saved to %s" % (self.__class__.__name__, html_path)
+                )
+                screenshot_path = "screenshot.jpg"
+                await self.screenshot(screenshot_path)
+                logging.info(
+                    "[%s] Current screenshot saved to %s"
+                    % (self.__class__.__name__, screenshot_path)
+                )
             raise ex
 
     def handle_log(self, message):
+        # 只落盘 warning/error，避免 hook.js 的 canvas 调试日志（每页数千条
+        # fillRect/fillStyle）在事件循环里同步刷盘，把 CDP 消息处理饿死导致
+        # page.goto 超时。此前每条 console 消息都 open/write/close 一次，
+        # 一个章节就能写 18MB 日志。
+        if message.type not in ("warning", "error"):
+            return
         with open("%s.log" % self._book_id, "a+", encoding="utf-8") as fp:
             fp.write("[%s] %s\n" % (self._url, message.text))
 
@@ -386,6 +433,27 @@ class WeReadWebPage(object):
                 raise RuntimeError("Login timeout")
         return False
 
+    def _guess_content_type(self, path):
+        mime_map = {
+            ".js": "text/javascript",
+            ".css": "text/css",
+            ".json": "application/json",
+            ".wasm": "application/wasm",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".svg": "image/svg+xml",
+            ".webp": "image/webp",
+            ".woff": "font/woff",
+            ".woff2": "font/woff2",
+            ".ttf": "font/ttf",
+            ".mp3": "audio/mpeg",
+            ".mp4": "video/mp4",
+        }
+        ext = os.path.splitext(path)[1].lower()
+        return mime_map.get(ext, "application/octet-stream")
+
     async def _get_from_cache_or_server(self, url, headers=None):
         u = urllib.parse.urlparse(url)
         path = os.path.join(
@@ -393,7 +461,17 @@ class WeReadWebPage(object):
         )
         if os.path.isfile(path):
             with open(path, "rb") as fp:
-                return 200, {}, fp.read()
+                body = fp.read()
+            # 缓存命中必须带上 Content-Type 与 CORS 头，否则 wasm/font 等
+            # 跨域资源（cdn.weread.qq.com）会被浏览器 CORS 拦截，导致阅读器
+            # 的 wasm hash 模块初始化失败、章节内容永远加载不出来。
+            resp_headers = {
+                "Content-Type": self._guess_content_type(path),
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Request-Method": "*",
+                "Access-Control-Allow-Headers": "*",
+            }
+            return 200, resp_headers, body
 
         dirpath = os.path.dirname(path)
         if not os.path.isdir(dirpath):
@@ -404,7 +482,7 @@ class WeReadWebPage(object):
         if status == 200:
             with open(path, "wb") as fp:
                 fp.write(body)
-        return status, headers, body
+        return status, dict(headers), body
 
     def _handle_request_headers(self, url, headers):
         for key in ("baggage", "sentry-trace"):
@@ -416,7 +494,9 @@ class WeReadWebPage(object):
         return headers
 
     def _handle_response_headers(self, url, headers):
-        if "oss.weread.qq.com" in url:
+        # cdn.weread.qq.com 的 wasm/font/js 都是跨域资源，必须放行 CORS，
+        # 否则阅读器的 wasm hash 模块初始化失败、章节内容加载不出来。
+        if "weread.qq.com" in url or "gtimg.cn" in url:
             headers["Access-Control-Allow-Origin"] = "*"
             headers["Access-Control-Request-Method"] = "*"
             headers["Access-Control-Allow-Headers"] = "*"
@@ -431,6 +511,20 @@ class WeReadWebPage(object):
         return body
 
     async def _handle_request(self, request):
+        """Proxy/mock an intercepted browser request; always respond or abort."""
+        try:
+            await self._handle_request_inner(request)
+        except Exception:
+            logging.exception(
+                "[%s] Handle request failed: %s" % (self.__class__.__name__, request.url)
+            )
+            try:
+                await request.abort()
+            except Exception:
+                pass
+
+    async def _handle_request_inner(self, request):
+        """Implement request interception responses for WeRead reader pages."""
         if request.url.startswith("chrome-extension://"):
             return await request.continue_()
 
@@ -442,14 +536,21 @@ class WeReadWebPage(object):
                 hook_script = fp.read()
                 response = {
                     "status": 200,
-                    "headers": {"Content-Type": "application/json"},
+                    "headers": {
+                        "Content-Type": "text/javascript",
+                        "Access-Control-Allow-Origin": "*",
+                    },
                     "body": hook_script,
                 }
                 return await request.respond(response)
 
+        # CSP report / analytics should never block page load under interception.
+        if "hijack_csp_report" in request.url:
+            return await request.abort()
+
         urlobj = urllib.parse.urlparse(request.url)
         is_resource_file = urlobj.path.endswith(
-            (".js", ".css", ".jpg", ".png", ".gif", ".svg")
+            (".js", ".css", ".jpg", ".png", ".gif", ".svg", ".woff", ".woff2", ".wasm")
         )
         status = 200
         headers = {
@@ -491,12 +592,10 @@ class WeReadWebPage(object):
                 "[%s][%s] Url %s return mock data"
                 % (self.__class__.__name__, request.method, request.url)
             )
-        elif "hijack_csp_report" in request.url:
-            return
         elif "/river/single" in request.url:
             body = b'{"err_code":0,"msg":"suc"}'
             headers["Content-Type"] = "application/json; charset=utf-8"
-            headers["Content-Length"] = len(body)
+            headers["Content-Length"] = str(len(body))
             logging.info(
                 "[%s][%s] Url %s return mock data"
                 % (self.__class__.__name__, request.method, request.url)
@@ -551,17 +650,41 @@ class WeReadWebPage(object):
         asyncio.ensure_future(self._handle_request(request))
 
     async def pre_load_page(self):
+        """Enable request interception once per browser page (avoid duplicate handlers)."""
+        if self._request_interception_ready:
+            return
         await self._page.setRequestInterception(True)
         self._page.on("request", self.handle_request)
+        self._request_interception_ready = True
+
+    async def wait_for_canvas_complete(self, timeout=30):
+        """Wait until hook.js finishes capturing the current page into markdown."""
+        script = (
+            "typeof canvasContextHandler !== 'undefined' && "
+            "canvasContextHandler.data && canvasContextHandler.data.complete;"
+        )
+        time0 = time.time()
+        while time.time() - time0 < timeout:
+            try:
+                result = await self._page.evaluate(script)
+            except Exception:
+                result = False
+            if result:
+                logging.info(
+                    "[%s] Canvas markdown ready in %.1fs"
+                    % (self.__class__.__name__, time.time() - time0)
+                )
+                return True
+            await asyncio.sleep(0.5)
+        logging.warning(
+            "[%s] Canvas markdown not ready after %ds"
+            % (self.__class__.__name__, timeout)
+        )
+        return False
 
     async def get_markdown(self):
-        script = "canvasContextHandler.data.complete;"
-        time0 = time.time()
-        while time.time() - time0 < 10:
-            result = await self._page.evaluate(script)
-            if result:
-                break
-            await asyncio.sleep(1)
+        """Return markdown captured by the Canvas hook for the current chapter."""
+        await self.wait_for_canvas_complete(timeout=15)
         script = "canvasContextHandler.data.markdown;"
         result = await self._page.evaluate(script)
         if not result:
@@ -571,27 +694,54 @@ class WeReadWebPage(object):
                 raise RuntimeError("Wait for creating markdown timeout")
         return result
 
+    async def _get_footer_button_text(self):
+        """Return visible reader footer button text, or empty string if absent."""
+        return await self._page.evaluate(
+            """() => {
+                const btn = document.querySelector('button.readerFooter_button');
+                return btn ? (btn.innerText || '').trim() : '';
+            }"""
+        )
+
     async def _check_next_page(self, page_timeout=30):
-        """page_timeout: seconds to wait per page for the footer button."""
+        """Wait for chapter content, then flip pages if legacy footer UI exists.
+
+        New WeRead web UI often has no `button.readerFooter_button` (continuous
+        scroll). In that case we only wait for Canvas capture and return.
+        """
+        await self.wait_for_canvas_complete(timeout=min(40, max(15, page_timeout)))
+
+        # Legacy page-turn UI: poll briefly; missing footer is normal for new UI.
+        footer_wait_ms = 3000
         while True:
             try:
                 await self.wait_for_selector(
-                    "button.readerFooter_button", timeout=page_timeout * 1000
+                    "button.readerFooter_button",
+                    timeout=footer_wait_ms,
+                    dump_on_timeout=False,
                 )
             except pyppeteer.errors.TimeoutError:
-                logging.info("[%s] Footer button not found after %ds, stop" % (self.__class__.__name__, page_timeout))
+                logging.info(
+                    "[%s] No page-turn footer button, treat as chapter complete"
+                    % self.__class__.__name__
+                )
                 break
-            result = await self._page.evaluate(
-                "document.getElementsByClassName('readerFooter_button')[0].innerText;"
-            )
+
+            result = await self._get_footer_button_text()
             if result == "下一页":
                 logging.info("[%s] Go to next page" % self.__class__.__name__)
                 await self._page.evaluate(
-                    r"canvasContextHandler.data.markdown += '\n\n';"
+                    """() => {
+                        canvasContextHandler.data.complete = false;
+                        canvasContextHandler.data.markdown += '\\n\\n';
+                    }"""
                 )
-                await self.pre_load_page()
                 await self._page.click("button.readerFooter_button")
-                await asyncio.sleep(1)
+                ready = await self.wait_for_canvas_complete(
+                    timeout=min(40, max(15, page_timeout))
+                )
+                if not ready:
+                    break
             elif result in ("下一章", "全书已读完", "全书完", "标记读完", "已读完所有章节"):
                 logging.info("[%s] Chapter end: %r" % (self.__class__.__name__, result))
                 break
@@ -612,12 +762,17 @@ class WeReadWebPage(object):
         )
 
     async def goto_chapter(self, chapter_id, timeout=120):
+        """Open a chapter page and flip through all pages until chapter end."""
         logging.info("[%s] Go to chapter %s" % (self.__class__.__name__, chapter_id))
         # await self.clear_cache()
         await self.pre_load_page()
         self._url = self._get_chapter_url(chapter_id)
-        await self._page.goto(self._url, timeout=1000 * timeout)
-        # page_timeout per page: stay well within outer timeout while allowing slow pages
+        # domcontentloaded avoids hanging on late analytics/fonts under interception.
+        logging.info("[%s] Navigate to %s" % (self.__class__.__name__, self._url))
+        await self._page.goto(
+            self._url, timeout=1000 * timeout, waitUntil="domcontentloaded"
+        )
+        logging.info("[%s] Chapter page loaded, checking pages" % self.__class__.__name__)
         page_timeout = max(20, timeout - 10)
         try:
             await self._check_next_page(page_timeout=page_timeout)

@@ -19,13 +19,19 @@ function getImgElemList() {
   let imgList = [];
   for (let div of document.getElementsByClassName("passage-content")) {
     for (let img of div.getElementsByTagName("img")) {
+      let src = img.getAttribute("src") || "";
+      // 跳过 data: URI 占位图（passage-content 内固定的 1x1 gif），
+      // 只保留真实 http(s) 图片
+      if (!/^https?:\/\//i.test(src)) {
+        continue;
+      }
       let style = img.getAttribute("style");
       let pos1 = style.indexOf("(");
       let pos2 = style.indexOf(")", pos1);
       let pos = style.substring(pos1 + 1, pos2).split(", ");
       let x = parseInt(pos[0]);
       let y = parseInt(pos[1]);
-      imgList.push([x, y, img.getAttribute("src")]);
+      imgList.push([x, y, src]);
     }
   }
   return imgList;

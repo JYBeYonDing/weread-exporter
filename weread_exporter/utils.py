@@ -26,11 +26,13 @@ def generate_user_agent():
     return user_agent_tmpl % random.randint(90, 130)
 
 
-async def fetch(url, method="GET", headers=None, data=None, respond_with_headers=False):
+async def fetch(url, method="GET", headers=None, data=None, respond_with_headers=False, timeout=15):
+    """Fetch a URL with retries. timeout is total seconds for one attempt."""
     headers = headers or {}
     headers.pop("sec-ch-ua", None)
     headers.pop("sec-ch-ua-platform", None)
-    async with aiohttp.ClientSession() as session:
+    client_timeout = aiohttp.ClientTimeout(total=timeout)
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
         method = getattr(session, method.lower())
         if data and not isinstance(data, bytes):
             data = data.encode("utf-8")
