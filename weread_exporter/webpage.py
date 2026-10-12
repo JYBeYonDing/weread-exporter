@@ -170,7 +170,7 @@ class WeReadWebPage(object):
         return True
 
     def _check_chrome(self):
-        """Locate Chrome executable from PATH or common install locations."""
+        """Locate system Chrome executable from PATH or common install locations."""
         path_list = os.environ["PATH"].split(";" if sys.platform == "win32" else ":")
         for chrome in ("chrome", "google-chrome"):
             if sys.platform == "win32":
@@ -205,16 +205,91 @@ class WeReadWebPage(object):
             % command
         )
 
+    def _ensure_pyppeteer_chromium(self):
+        """Ensure pyppeteer's bundled Chromium is downloaded; return its executable path.
+
+        New system Chrome breaks pyppeteer's request interception. Prefer the
+        bundled Chromium, and fall back to a known-downloadable revision when
+        pyppeteer's default snapshot URL is gone.
+        """
+        # Known-good Win/Mac/Linux snapshot IDs when default REVISION 404s.
+        fallback_revisions = ("1095492", "1002410", "982053")
+
+        def _try_revision(revision=None):
+            if revision:
+                os.environ["PYPPETEER_CHROMIUM_REVISION"] = str(revision)
+            # Import after env is set so REVISION picks up the override.
+            from importlib import reload
+            import pyppeteer.chromium_downloader as chromium_downloader
+
+            reload(chromium_downloader)
+            if not chromium_downloader.check_chromium():
+                logging.info(
+                    "[%s] Downloading pyppeteer Chromium revision %s (system Chrome unchanged)"
+                    % (
+                        self.__class__.__name__,
+                        chromium_downloader.REVISION,
+                    )
+                )
+                chromium_downloader.download_chromium()
+            chrome = str(chromium_downloader.chromium_executable())
+            if not os.path.isfile(chrome):
+                raise utils.ChromeNotInstalledError(
+                    "pyppeteer Chromium not found at %s" % chrome
+                )
+            return chrome
+
+        preferred = os.environ.get("PYPPETEER_CHROMIUM_REVISION")
+        revisions = []
+        if preferred:
+            revisions.append(preferred)
+        revisions.extend(r for r in fallback_revisions if r not in revisions)
+
+        last_error = None
+        for revision in revisions:
+            try:
+                chrome = _try_revision(revision)
+                logging.info(
+                    "[%s] Using pyppeteer Chromium: %s"
+                    % (self.__class__.__name__, chrome)
+                )
+                return chrome
+            except Exception as ex:
+                last_error = ex
+                logging.warning(
+                    "[%s] Chromium revision %s unavailable: %s"
+                    % (self.__class__.__name__, revision, ex)
+                )
+
+        raise utils.ChromeNotInstalledError(
+            "Failed to download pyppeteer Chromium. "
+            "Set PYPPETEER_CHROMIUM_REVISION to a valid snapshot, or use --system-chrome. "
+            "Last error: %s" % last_error
+        )
+
+    def _resolve_browser_executable(self, use_system_chrome=False):
+        """Resolve browser binary: bundled Chromium by default, or system Chrome on demand."""
+        if use_system_chrome:
+            chrome = self._check_chrome()
+            logging.warning(
+                "[%s] Using system Chrome (%s). New Chrome may break request interception."
+                % (self.__class__.__name__, chrome)
+            )
+            return chrome
+        return self._ensure_pyppeteer_chromium()
+
     async def launch(
         self,
         headless=False,
         force_login=False,
         use_default_profile=False,
         mock_user_agent=False,
-        proxy_server=None
+        proxy_server=None,
+        use_system_chrome=False,
     ):
+        """Launch browser. Default uses pyppeteer Chromium to keep CDP interception working."""
         logging.info("[%s] Launch url %s" % (self.__class__.__name__, self._home_url))
-        chrome = self._check_chrome()
+        chrome = self._resolve_browser_executable(use_system_chrome=use_system_chrome)
         args = ["--no-first-run", "--remote-allow-origins=*"]
         if sys.platform == "linux":
             # Avoid Chrome crashes caused by /dev/shm being too small (common on Linux)
@@ -233,7 +308,8 @@ class WeReadWebPage(object):
             args.append("--proxy-server=%s" % proxy_server)
         args.append("about:blank")
         logging.info(
-            "[%s] Chrome args: chrome %s" % (self.__class__.__name__, " ".join(args))
+            "[%s] Chrome args: %s %s"
+            % (self.__class__.__name__, chrome, " ".join(args))
         )
         self._browser = await pyppeteer.launch(
             executablePath=chrome,

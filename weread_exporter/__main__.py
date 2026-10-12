@@ -76,6 +76,12 @@ async def async_main():
         "--proxy-server",
         help="http proxy server, e.g. http://127.0.0.1:8888",
     )
+    parser.add_argument(
+        "--system-chrome",
+        help="use system Chrome instead of pyppeteer Chromium (may break on new Chrome)",
+        action="store_true",
+        default=False,
+    )
     args = parser.parse_args()
     args.output_format = args.output_format or ["epub"]
     if "mobi" in args.output_format and "epub" not in args.output_format:
@@ -118,6 +124,7 @@ async def async_main():
                     use_default_profile=args.use_default_profile,
                     mock_user_agent=args.mock_user_agent,
                     proxy_server=args.proxy_server,
+                    use_system_chrome=args.system_chrome,
                 )
             except RuntimeError:
                 logging.exception("Launch book %s home page failed" % book_id)
