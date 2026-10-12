@@ -1,28 +1,79 @@
 # 微信读书导出工具
 
+将微信读书网页版（weread.qq.com）的书籍正文导出为 markdown / epub / pdf / mobi / txt 格式。
+
 ## 实现原理
 
-通过Hook Web页面中的Canvas函数，获取绘制到Canvas中的文本及样式等信息，转换成markdown格式，保存到本地文件，然后再转换成最终的epub或pdf格式，而mobi格式则是使用kindlegen工具从epub格式转换来的。
+微信读书网页版的正文是以 Canvas 绘制（而非 DOM 文本）渲染的。本工具通过以下方式还原正文：
 
-## INSTALL
+1. 使用 pyppeteer 驱动 Chromium 打开阅读器页面；
+2. 拦截阅读器的网络请求，将阅读器脚本 `https://cdn.weread.qq.com/web/1.392ec47a.js` 替换为内置的 `hook.js`，其余静态资源走本地缓存，统计 / 上报类接口直接 mock 返回；
+3. `hook.js` 通过 Proxy 劫持 `CanvasRenderingContext2D`，从 `fillText`、字体与颜色设置等调用中捕获文本及样式信息，按字号推断标题层级、按颜色识别高亮，并按坐标回填代码块 / 图片 / 分隔线，拼装成 markdown；
+4. 逐章保存 markdown，再据此转换成 epub / pdf / txt 等最终格式；mobi 格式由 kindlegen 从 epub 转换而来。
+
+## 安装
 
 ```bash
 $ pip3 install -e .
 ```
 
-## USAGE
+> 需要 Python 3.7+。PDF 导出依赖 WeasyPrint；Windows 下所需的 GTK 动态库已随包附带（`weread_exporter/bin/win32/`）。
+
+## 使用
 
 ```bash
-$ python -m weread_exporter -b $book_id -o epub -o pdf
+$ python -m weread_exporter -b <book_id> [-o <format> ...]
 ```
 
-> 获取书籍ID的方法：在页面`https://weread.qq.com/`搜索目标书籍，进入到书籍介绍页，URL格式为：`https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88`，这里的`08232ac0720befa90825d88`就是书籍ID。
+### 获取书籍 ID
 
-`-o`参数用于指定要保存的文件格式，目前支持的格式有：`epub`、`pdf`、`mobi`，生成的文件在当前目录下的`output`目录中。
+在 `https://weread.qq.com/` 搜索目标书籍，进入书籍介绍页，URL 形如：
 
-`epub`格式适合手机端访问，`pdf`格式适合电脑端访问，`mobi`格式适合kindle访问。
+```
+https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88
+```
 
-命令行还支持一个可选参数`--force-login`，默认为`False`，指定该参数时，会先进行登录操作。
+其中末尾的 `08232ac0720befa90825d88` 即书籍 ID。
+
+> 如果 ID 中包含下划线 `_`，会被当作**书单 ID** 处理，从 `https://weread.qq.com/misc/booklist/<id>` 展开为书单内的全部书籍并逐本导出。
+
+### 输出格式
+
+通过 `-o / --output-format` 指定，可重复多次以同时导出多种格式。取值：`md`、`epub`、`pdf`、`mobi`、`txt`，默认 `epub`。
+
+| 格式 | 产物 | 说明 |
+| --- | --- | --- |
+| `md` | `output/<书名>/` 目录 | 含 `chapters/`、`images/`、`meta.json`、`cover.jpg` |
+| `epub` | `output/<书名>.epub` | 适合手机端访问 |
+| `pdf` | `output/<书名>.pdf` | 适合电脑端访问 |
+| `mobi` | `output/<书名>.mobi` | 适合 Kindle 访问；**仅 Linux 支持**（依赖内置 kindlegen），会同时生成 epub |
+| `txt` | `output/<书名>.txt` | 纯文本 |
+
+生成的文件位于当前目录下的 `output/` 目录中。若目标文件已存在，则跳过该格式（不覆盖已有文件）。
+
+### 命令行参数
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-b, --book-id` | 必填 | 书籍 ID（或含 `_` 的书单 ID） |
+| `-o, --output-format` | `epub` | 输出格式，可重复指定 |
+| `--load-timeout` | `60` | 单章页面加载超时（秒） |
+| `--load-interval` | `30` | 每章加载后的间隔（秒），用于降低触发风控的风险 |
+| `--css-file` | 无 | 自定义 CSS 文件路径，用于覆盖默认样式 |
+| `--headless` | 关闭 | 以无头模式运行 Chrome |
+| `--force-login` | 关闭 | 强制先执行登录（扫码） |
+| `--use-default-profile` | 关闭 | 使用 Chrome 默认用户目录 |
+| `--mock-user-agent` | 关闭 | 使用随机生成的 User-Agent |
+| `--proxy-server` | 无 | HTTP 代理，例如 `http://127.0.0.1:8888` |
+| `--system-chrome` | 关闭 | 使用系统安装的 Chrome 替代内置 Chromium |
+
+### 浏览器选择
+
+默认使用 pyppeteer **自带的 Chromium**（首次运行会自动下载）。新版系统 Chrome 会破坏 pyppeteer 的请求拦截，因此不再默认使用；如需改用系统 Chrome，请显式传入 `--system-chrome`。
+
+### 登录
+
+登录状态缓存于 `cache/cookie.txt`。首次运行（或传入 `--force-login`）时会打开登录页，请在 300 秒内完成扫码登录；登录成功后 cookie 会自动保存，后续导出直接复用。
 
 ## 免责申明
 
