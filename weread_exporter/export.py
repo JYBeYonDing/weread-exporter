@@ -126,7 +126,7 @@ class WeReadExporter(object):
                     )
                     pos += 10
                 else:
-                    image_name = utils.md5(url) + ".jpg"
+                    image_name = utils.md5(url) + utils.guess_image_ext(data)
                     with open(os.path.join(self._image_dir, image_name), "wb") as fp:
                         fp.write(data)
                     output = output[: pos + 2] + "images/" + image_name + output[pos1:]
@@ -185,10 +185,31 @@ class WeReadExporter(object):
                     img.decompose()
                     continue
                 src = os.path.join(self._save_dir, src_attr)
-                if not src.endswith(".png"):
-                    png_path = src[:-3] + "png"
+                if not os.path.isfile(src):
+                    logging.warning(
+                        "[%s] Image %s not found, drop it from PDF"
+                        % (self.__class__.__name__, src_attr)
+                    )
+                    img.decompose()
+                    continue
+                # 磁盘上的扩展名不可靠（早期版本会把 PNG 存成 .jpg），
+                # 按内容判断，并用 splitext 换扩展名，别去猜扩展名长度。
+                with open(src, "rb") as fp:
+                    actual_ext = utils.guess_image_ext(fp.read(16)).lower()
+                if actual_ext == ".png" and src_attr.lower().endswith(".png"):
+                    continue
+                png_path = os.path.splitext(src)[0] + ".png"
+                png_attr = os.path.splitext(src_attr)[0] + ".png"
+                try:
                     utils.save_to_png(src, png_path)
-                    img.attrs["src"] = src_attr[:-3] + "png"
+                except Exception:
+                    logging.exception(
+                        "[%s] Convert %s to png failed, drop it from PDF"
+                        % (self.__class__.__name__, src_attr)
+                    )
+                    img.decompose()
+                    continue
+                img.attrs["src"] = png_attr
 
             raw_html = soup.prettify()
 
@@ -313,7 +334,7 @@ class WeReadExporter(object):
                 content = fp.read()
                 image = epub.EpubItem(
                     file_name="images/" + it,
-                    media_type="image/jpeg",
+                    media_type=utils.guess_mime_type(it),
                     content=content,
                 )
                 book.add_item(image)

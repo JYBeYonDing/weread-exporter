@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import os
 import random
 
 import aiohttp
@@ -110,8 +111,52 @@ def wr_hash(s):
     return result
 
 
+def guess_image_ext(data, default=".jpg"):
+    """Return a file extension matching the actual bytes (magic number).
+
+    WeasyPrint's bundled GTK stack on Windows only ships a PNG loader, and it
+    selects the loader by file extension. Naming an image by its real format
+    keeps the exported markdown honest and lets the PNG loader work.
+    """
+    head = data[:12] if isinstance(data, (bytes, bytearray)) else b""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if head.startswith(b"GIF8"):
+        return ".gif"
+    if head.startswith(b"BM"):
+        return ".bmp"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    return default
+
+
+def guess_mime_type(filename):
+    """Map a file extension to an image MIME type for epub packaging."""
+    mime_map = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".bmp": "image/bmp",
+        ".webp": "image/webp",
+    }
+    return mime_map.get(os.path.splitext(filename)[1].lower(), "image/jpeg")
+
+
 def save_to_png(img_path, png_path):
+    """Convert an image to PNG. No-op when a usable PNG already exists."""
+    if os.path.isfile(png_path) and os.path.getsize(png_path) > 3:
+        return
     from PIL import Image
 
     img = Image.open(img_path)
-    img.save(png_path)
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        background = Image.new("RGB", img.size, (255, 255, 255))
+        background.paste(img, mask=img.split()[-1])
+        img = background
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+    img.save(png_path, "PNG", optimize=True)

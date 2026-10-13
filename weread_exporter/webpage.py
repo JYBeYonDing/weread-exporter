@@ -726,12 +726,35 @@ class WeReadWebPage(object):
         asyncio.ensure_future(self._handle_request(request))
 
     async def pre_load_page(self):
-        """Enable request interception once per browser page (avoid duplicate handlers)."""
+        """Inject hook.js into reader pages, once per browser page.
+
+        Previously this enabled pyppeteer request interception and served
+        hook.js by faking the response for the reader bundle
+        `cdn.weread.qq.com/web/1.392ec47a.js`. The current WeRead reader stalls
+        under interception: it never issues its content API calls
+        (`/web/book/readInfo`, `/web/book/chapter/*`, `/web/book/read`) and
+        never loads the wasm/font resources, so chapters stay in LOADING and
+        nothing is drawn to the canvas. Injecting the hook through CDP needs no
+        interception, and the reader then loads content normally.
+
+        Note: pyppeteer's own `page.evaluateOnNewDocument()` does not take
+        effect here, so the raw CDP command is used.
+        """
         if self._request_interception_ready:
             return
-        await self._page.setRequestInterception(True)
-        self._page.on("request", self.handle_request)
+        hook_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "hook.js"
+        )
+        with open(hook_path, encoding="utf-8") as fp:
+            hook_script = fp.read()
+        await self._page._client.send(
+            "Page.addScriptToEvaluateOnNewDocument", {"source": hook_script}
+        )
         self._request_interception_ready = True
+        logging.info(
+            "[%s] hook.js injected via CDP (request interception disabled)"
+            % self.__class__.__name__
+        )
 
     async def wait_for_canvas_complete(self, timeout=30):
         """Wait until hook.js finishes capturing the current page into markdown."""
