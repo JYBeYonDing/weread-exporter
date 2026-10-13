@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 
@@ -251,24 +252,55 @@ class WeReadExporter(object):
                 with open(path, "wb") as fp:
                     fp.write(fixed.encode("utf-8"))
 
+    def _collect_referenced_images(self):
+        """Image filenames the cached chapters actually reference.
+
+        Chapter files use the book-root-relative form `images/<name>`. Only these
+        files belong in the delivered markdown: the image dir also accumulates
+        unreferenced twins — e.g. png-mode PDF rendering writes a `<name>.png`
+        next to every PNG-as-.jpg original — and copying them all doubled the
+        bundle for no gain.
+        """
+        referenced = set()
+        for name in os.listdir(self._chapter_dir):
+            if not name.endswith(".md"):
+                continue
+            with open(os.path.join(self._chapter_dir, name), encoding="utf-8", errors="replace") as fp:
+                referenced.update(re.findall(r"\]\(images/([^)]+)\)", fp.read()))
+        return referenced
+
     async def export_markdown_files(self, output_dir):
         import shutil
 
         if not os.path.isdir(output_dir):
             os.makedirs(output_dir)
 
-        # Copy chapters
+        # Copy chapters, skipping the .md.bak intermediates left by
+        # pre_process_markdown — they are bookkeeping, not deliverable content.
         dest_chapters = os.path.join(output_dir, "chapters")
         if os.path.exists(dest_chapters):
             shutil.rmtree(dest_chapters)
-        shutil.copytree(self._chapter_dir, dest_chapters)
+        os.makedirs(dest_chapters)
+        for name in os.listdir(self._chapter_dir):
+            if not name.endswith(".md"):
+                continue
+            shutil.copy(os.path.join(self._chapter_dir, name), dest_chapters)
         self._fix_markdown_image_links(dest_chapters)
 
-        # Copy images
+        # Copy only the images the chapters reference
         dest_images = os.path.join(output_dir, "images")
         if os.path.exists(dest_images):
             shutil.rmtree(dest_images)
-        shutil.copytree(self._image_dir, dest_images)
+        os.makedirs(dest_images)
+        for name in sorted(self._collect_referenced_images()):
+            src = os.path.join(self._image_dir, name)
+            if os.path.isfile(src):
+                shutil.copy(src, dest_images)
+            else:
+                logging.warning(
+                    "[%s] Referenced image %s not found, skip"
+                    % (self.__class__.__name__, name)
+                )
 
         # Copy meta.json
         shutil.copy(self._meta_path, output_dir)
