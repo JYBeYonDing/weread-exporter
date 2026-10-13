@@ -302,8 +302,12 @@ class WeReadExporter(object):
                     % (self.__class__.__name__, name)
                 )
 
-        # Copy meta.json
-        shutil.copy(self._meta_path, output_dir)
+        # meta.json stays in the cache dir (the renderers read it from there) and
+        # is deliberately not part of the delivered bundle. Drop a stale copy an
+        # earlier version may have written here.
+        stale_meta = os.path.join(output_dir, "meta.json")
+        if os.path.isfile(stale_meta):
+            os.remove(stale_meta)
 
         # Copy cover.jpg if exists
         if os.path.isfile(self._cover_image_path):
