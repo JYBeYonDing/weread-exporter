@@ -229,6 +229,28 @@ class WeReadExporter(object):
         # Generate PDF
         html.write_pdf(save_path, stylesheets=css)
 
+    @staticmethod
+    def _fix_markdown_image_links(chapter_dir):
+        """Point image links at the sibling images/ dir.
+
+        A chapter file lives in chapters/ while its images live in the sibling
+        images/ directory, so the `images/x.jpg` ref stored in the chapter (which
+        is correct when rendering from the book root) would resolve to
+        chapters/images/x.jpg here. Rewrite it to ../images/x.jpg for the copy we
+        hand to the user. The cached chapter files are left untouched because the
+        PDF/epub renderers depend on the book-root-relative form.
+        """
+        for name in os.listdir(chapter_dir):
+            if not name.endswith(".md"):
+                continue
+            path = os.path.join(chapter_dir, name)
+            with open(path, "rb") as fp:
+                text = fp.read().decode("utf-8", errors="replace")
+            fixed = text.replace("](images/", "](../images/")
+            if fixed != text:
+                with open(path, "wb") as fp:
+                    fp.write(fixed.encode("utf-8"))
+
     async def export_markdown_files(self, output_dir):
         import shutil
 
@@ -240,6 +262,7 @@ class WeReadExporter(object):
         if os.path.exists(dest_chapters):
             shutil.rmtree(dest_chapters)
         shutil.copytree(self._chapter_dir, dest_chapters)
+        self._fix_markdown_image_links(dest_chapters)
 
         # Copy images
         dest_images = os.path.join(output_dir, "images")
