@@ -66,6 +66,25 @@ https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88
 | `--mock-user-agent` | 关闭 | 使用随机生成的 User-Agent |
 | `--proxy-server` | 无 | HTTP 代理，例如 `http://127.0.0.1:8888` |
 | `--system-chrome` | 关闭 | 使用系统安装的 Chrome 替代内置 Chromium |
+| `--compress-pdf-images` | 关闭 | 压缩 PDF 内嵌图片（降采样 + 调色板），另存为 `<书名>-compressed.pdf`，不覆盖原图与高清 PDF |
+| `--pdf-image-max-side` | `1000` | 配合上一个参数：图片长边上限（像素，0 表示不缩放） |
+| `--pdf-image-colors` | `256` | 配合上一个参数：调色板颜色数（0 表示保留真彩） |
+
+### PDF 体积
+
+默认按原图分辨率嵌入，扫描类/漫画类书籍会产出很大的 PDF（实测一本 197 页漫画约 102 MB）。
+加 `--compress-pdf-images` 会生成一份压缩版：图片另存到 `cache/<book_id>/pdf-images-<长边>-<颜色数>/`，
+原图与不带该参数导出的 PDF 都不受影响，可随时对照取舍。
+
+```bash
+# 同一本书：高清版 + 约 20 MB 的压缩版
+$ python -m weread_exporter -b <book_id> -o pdf
+$ python -m weread_exporter -b <book_id> -o pdf --compress-pdf-images --pdf-image-max-side 600
+```
+
+> 该平台（Windows）自带的图片库只有 PNG 解码器，PDF 图片只能以 PNG 形式嵌入，
+> 因此这里用"降采样 + 调色板"而不是转 JPEG。实测 197 页漫画：原版 102 MB，
+> `--pdf-image-max-side 600` 约 19.6 MB，正文与插图仍清晰可读。
 
 ### 浏览器选择
 

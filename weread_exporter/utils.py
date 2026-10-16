@@ -154,8 +154,14 @@ def guess_mime_type(filename):
     return mime_map.get(os.path.splitext(filename)[1].lower(), "image/jpeg")
 
 
-def save_to_png(img_path, png_path):
-    """Convert an image to PNG. No-op when a usable PNG already exists."""
+def save_to_png(img_path, png_path, max_side=0, colors=0):
+    """Convert an image to PNG. No-op when a usable PNG already exists.
+
+    max_side > 0 caps the longest edge (pixels); colors > 0 quantizes to a
+    palette of that many colors. Both shrink the result a lot on scanned /
+    comic pages, which is the only lever available here: the GTK stack shipped
+    in bin/win32 has a PNG loader only, so the PDF cannot embed JPEG.
+    """
     if os.path.isfile(png_path) and os.path.getsize(png_path) > 3:
         return
     from PIL import Image
@@ -168,4 +174,15 @@ def save_to_png(img_path, png_path):
         img = background
     elif img.mode != "RGB":
         img = img.convert("RGB")
+    if max_side:
+        width, height = img.size
+        if max(width, height) > max_side:
+            ratio = max_side / max(width, height)
+            img = img.resize(
+                (max(1, int(width * ratio)), max(1, int(height * ratio))),
+                Image.LANCZOS,
+            )
+    if colors:
+        img = img.convert("P", palette=Image.ADAPTIVE, colors=colors)
+    os.makedirs(os.path.dirname(png_path), exist_ok=True)
     img.save(png_path, "PNG", optimize=True)

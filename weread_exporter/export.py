@@ -232,7 +232,14 @@ class WeReadExporter(object):
         return html
 
     async def markdown_to_pdf(
-        self, save_path, extra_css=None, image_format="jpg", dump_html=False
+        self,
+        save_path,
+        extra_css=None,
+        image_format="jpg",
+        dump_html=False,
+        compress_images=False,
+        image_max_side=1000,
+        image_colors=256,
     ):
         meta_data = await self._load_meta_data()
         raw_html = '<img src="cover.jpg" style="width: 100%;">\n'
@@ -243,6 +250,8 @@ class WeReadExporter(object):
             "<pre><code>", "<pre><code>\n"
         )  # Fix unexpected indent
         if image_format == "png":
+            compressed_name = "pdf-images-%d-%d" % (image_max_side, image_colors)
+            compressed_dir = os.path.join(self._save_dir, compressed_name)
             soup = bs4.BeautifulSoup(raw_html, features="html.parser")
             for img in soup.find_all("img"):
                 src_attr = img.attrs.get("src", "")
@@ -262,12 +271,25 @@ class WeReadExporter(object):
                 # 按内容判断，并用 splitext 换扩展名，别去猜扩展名长度。
                 with open(src, "rb") as fp:
                     actual_ext = utils.guess_image_ext(fp.read(16)).lower()
-                if actual_ext == ".png" and src_attr.lower().endswith(".png"):
+                already_png = actual_ext == ".png" and src_attr.lower().endswith(".png")
+                if already_png and not compress_images:
                     continue
-                png_path = os.path.splitext(src)[0] + ".png"
-                png_attr = os.path.splitext(src_attr)[0] + ".png"
+                if compress_images:
+                    # Compressed copies live in their own directory so the
+                    # originals (and the twins a full-quality render needs) stay
+                    # untouched — re-exporting without the flag still gives the
+                    # uncompressed PDF. The .png extension is required: it is how
+                    # the renderer picks a loader, and the bytes are always PNG.
+                    png_name = os.path.splitext(os.path.basename(src_attr))[0] + ".png"
+                    png_path = os.path.join(compressed_dir, png_name)
+                    png_attr = "%s/%s" % (compressed_name, png_name)
+                    args = {"max_side": image_max_side, "colors": image_colors}
+                else:
+                    png_path = os.path.splitext(src)[0] + ".png"
+                    png_attr = os.path.splitext(src_attr)[0] + ".png"
+                    args = {}
                 try:
-                    utils.save_to_png(src, png_path)
+                    utils.save_to_png(src, png_path, **args)
                 except Exception:
                     logging.exception(
                         "[%s] Convert %s to png failed, drop it from PDF"

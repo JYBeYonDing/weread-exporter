@@ -4,6 +4,12 @@ import logging
 import os
 import sys
 
+# Suffix for the compressed PDF, so it never overwrites the full-quality one.
+COMPRESS_PDF_SUFFIX = "-compressed"
+# Defaults tuned on a 368-image comic book: ~90 MB of pages -> under 20 MB.
+DEFAULT_PDF_IMAGE_MAX_SIDE = 1000
+DEFAULT_PDF_IMAGE_COLORS = 256
+
 
 def patch_windows():
     bin_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "bin", "win32")
@@ -81,6 +87,27 @@ async def async_main():
         help="use system Chrome instead of pyppeteer Chromium (may break on new Chrome)",
         action="store_true",
         default=False,
+    )
+    parser.add_argument(
+        "--compress-pdf-images",
+        help="shrink the images embedded in the PDF (downscale + palette). Writes "
+        "a separate <title>%s.pdf; the uncompressed images are left in place."
+        % COMPRESS_PDF_SUFFIX,
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--pdf-image-max-side",
+        help="with --compress-pdf-images: cap the longest image edge (pixels, 0 = keep size)",
+        type=int,
+        default=DEFAULT_PDF_IMAGE_MAX_SIDE,
+    )
+    parser.add_argument(
+        "--pdf-image-colors",
+        help="with --compress-pdf-images: palette size after downscaling "
+        "(0 = keep truecolor)",
+        type=int,
+        default=DEFAULT_PDF_IMAGE_COLORS,
     )
     args = parser.parse_args()
     args.output_format = args.output_format or ["epub"]
@@ -206,7 +233,8 @@ async def async_main():
                 logging.info("Save file %s complete" % save_path)
 
         if "pdf" in args.output_format:
-            save_path = os.path.join(output_dir, "%s.pdf" % title)
+            suffix = COMPRESS_PDF_SUFFIX if args.compress_pdf_images else ""
+            save_path = os.path.join(output_dir, "%s%s.pdf" % (title, suffix))
             if os.path.isfile(save_path):
                 logging.info("File %s exist, ignore export" % save_path)
             else:
@@ -217,6 +245,9 @@ async def async_main():
                     save_path,
                     extra_css=extra_css,
                     image_format=image_format,
+                    compress_images=args.compress_pdf_images,
+                    image_max_side=args.pdf_image_max_side,
+                    image_colors=args.pdf_image_colors,
                 )
                 logging.info("Save file %s complete" % save_path)
 
