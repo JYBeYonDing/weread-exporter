@@ -27,6 +27,14 @@ class PageTurnStalledError(LoadChapterFailedError):
     """
 
 
+class ChapterContentMissingError(LoadChapterFailedError):
+    """The reader never drew this chapter (e.g. FETCH_READER_CHAPTER_CONTENT failed).
+
+    Also restart-worthy: the same session that failed the content fetch tends to
+    fail it again, so a fresh browser is the cheaper retry.
+    """
+
+
 class InvalidUserError(RuntimeError):
     pass
 

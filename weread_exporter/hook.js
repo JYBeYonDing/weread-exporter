@@ -1,4 +1,31 @@
-const defaultFontColor = "rgb(208, 211, 216)";
+// The reader paints body text in a colour that depends on the theme and on the
+// book, so it cannot be hardcoded: a fixed guess paints whole books in the
+// highlight colour (《优势谈判》 came out 95% green with the old
+// `rgb(208, 211, 216)` constant, which is only the dark-theme body colour).
+// Instead the body colour is learned from the most frequent colour drawn at
+// body font size — a book's highlights are always a minority of its text.
+const bodyColorMinSamples = 12;
+
+function normalizeColor(value) {
+  if (typeof value !== "string") return String(value);
+  let v = value.trim().toLowerCase();
+  let m = /^#([0-9a-f]{3})$/.exec(v);
+  if (m) {
+    let [r, g, b] = m[1].split("");
+    return parseInt(r + r, 16) + "," + parseInt(g + g, 16) + "," + parseInt(b + b, 16);
+  }
+  m = /^#([0-9a-f]{6})$/.exec(v);
+  if (m) {
+    let h = m[1];
+    return parseInt(h.slice(0, 2), 16) + "," + parseInt(h.slice(2, 4), 16) + "," + parseInt(h.slice(4, 6), 16);
+  }
+  m = /^rgba?\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)/.exec(v);
+  if (m) {
+    return Math.round(+m[1]) + "," + Math.round(+m[2]) + "," + Math.round(+m[3]);
+  }
+  return v;
+}
+
 function getPreElemList() {
   let preList = [];
   for (let div of document.getElementsByClassName("passage-content")) {
@@ -68,6 +95,32 @@ let canvasContextHandler = {
     fontColorChanged: false,
     highlightMode: false,
     supMode: false,
+    bodyColorCounts: {},
+    bodyColorSamples: 0,
+  },
+  noteBodyColor(color) {
+    if (!color) return;
+    let key = normalizeColor(color);
+    this.data.bodyColorCounts[key] = (this.data.bodyColorCounts[key] || 0) + 1;
+    this.data.bodyColorSamples += 1;
+  },
+  bodyColor() {
+    let best = "", bestN = 0;
+    let counts = this.data.bodyColorCounts;
+    for (let key in counts) {
+      if (counts[key] > bestN) {
+        bestN = counts[key];
+        best = key;
+      }
+    }
+    return best;
+  },
+  isBodyColor(color) {
+    // Before a clear majority exists, assume body text. Guessing "highlight"
+    // wrongly paints the whole book in the highlight colour, while guessing
+    // "body" only costs the tint on a passage that really was highlighted.
+    if (this.data.bodyColorSamples < bodyColorMinSamples) return true;
+    return normalizeColor(color) === this.bodyColor();
   },
   ensureHighlightClosed() {
     if (this.data.highlightMode) {
@@ -123,6 +176,10 @@ let canvasContextHandler = {
                 that.data.markdown = "## " + title.innerText + "\n\n";
               }
             }
+            // 正文级字号（标题分支在上面，≥23 已单独处理）：统计字色，用来学出正文色
+            if (that.data.fontSize >= 18 && that.data.fontSize < 23) {
+              that.noteBodyColor(that.data.fontColor);
+            }
             if (that.data.fontSizeChanged && that.data.fontSize <= 18) {
               console.log("add sup tag");
               if (that.data.highlightMode) {
@@ -158,7 +215,7 @@ let canvasContextHandler = {
                 if (args[2] - that.data.lastPos[1] >= 55 || that.data.lastPos[0] < 750) {
                   that.ensureHighlightClosed();
                   that.data.markdown += "\n\n";
-                  if (that.data.fontColor !== defaultFontColor) {
+                  if (!that.isBodyColor(that.data.fontColor)) {
                     that.data.markdown += "`";
                     that.data.highlightMode = true;
                   }
@@ -255,6 +312,8 @@ let canvasContextHandler = {
     this.data.fontColor = "";
     this.data.fontColorChanged = false;
     this.data.supMode = false;
+    // bodyColorCounts / bodyColorSamples 故意不清空：正文色是整本书的属性，
+    // 而本方法每次翻页都会走一遍，清掉就等于每页都要重新学一遍。
   },
   updateMarkdown() {
     let imgList = getImgElemList();

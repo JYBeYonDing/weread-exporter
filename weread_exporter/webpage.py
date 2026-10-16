@@ -854,7 +854,25 @@ class WeReadWebPage(object):
         New WeRead web UI often has no `button.readerFooter_button` (continuous
         scroll). In that case we only wait for Canvas capture and return.
         """
-        await self.wait_for_canvas_complete(timeout=min(40, max(15, page_timeout)))
+        ready = await self.wait_for_canvas_complete(
+            timeout=min(40, max(15, page_timeout))
+        )
+        if not ready:
+            # Raising here keeps the failure inside the exporter's retry loop.
+            # Letting it slide meant get_markdown() blew up later and aborted the
+            # whole book — which is what a single reader-side
+            # FETCH_READER_CHAPTER_CONTENT failure did to 《优势谈判》.
+            try:
+                has_text = await self._page.evaluate(
+                    "(typeof canvasContextHandler !== 'undefined' && "
+                    "canvasContextHandler.data.markdown || '').length > 0"
+                )
+            except Exception:
+                has_text = False
+            if not has_text:
+                raise utils.ChapterContentMissingError(
+                    "Chapter content never rendered (reader fetch failed?)"
+                )
 
         # Legacy page-turn UI: poll briefly; missing footer is normal for new UI.
         footer_wait_ms = 3000

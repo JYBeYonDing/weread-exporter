@@ -567,12 +567,17 @@ class WeReadExporter(object):
                 except Exception as ex:
                     err_msg = str(ex)
                     # Detect a dead browser session — no point retrying with the
-                    # same dead browser. A stalled page turn belongs here too:
-                    # it leaves the CDP link wedged, so a retry on the same
-                    # browser would stall the same way. The browser is restarted
-                    # and the chapter retried; a second stall then falls back.
+                    # same dead browser. A stalled page turn and a chapter the
+                    # reader never drew belong here too: both leave the session
+                    # wedged, so retrying on it would fail the same way. The
+                    # browser is restarted and the chapter retried; a second
+                    # stall then falls back.
                     is_browser_dead = isinstance(
-                        ex, utils.PageTurnStalledError
+                        ex,
+                        (
+                            utils.PageTurnStalledError,
+                            utils.ChapterContentMissingError,
+                        ),
                     ) or (
                         _pyppeteer_errors
                         and isinstance(ex, _pyppeteer_errors.NetworkError)
@@ -597,6 +602,10 @@ class WeReadExporter(object):
                         % (self.__class__.__name__, chapter["title"], attempt + 1)
                     )
                 else:
+                    # get_markdown() belongs inside the attempt: when a chapter's
+                    # canvas never rendered it used to raise out of this loop and
+                    # abort the whole book instead of retrying the chapter.
+                    markdown = await self._page.get_markdown()
                     chapter_done = True
                     break
 
@@ -608,8 +617,6 @@ class WeReadExporter(object):
                 with open(file_path, "wb") as fp:
                     fp.write(b"<!-- load failed: max retries -->")
                 continue
-
-            markdown = await self._page.get_markdown()
 
             # A page turn that silently did not advance yields a chapter with a
             # correct-looking tail but a short body. Re-fetch it once on a fresh
