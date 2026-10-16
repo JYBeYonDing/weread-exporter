@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -242,9 +243,59 @@ async def async_main():
             for title, used, reason in skipped:
                 logging.error("  %s (%d restarts): %s", title, used, reason)
 
+        # Chapters that stayed short through every re-fetch: these are the real
+        # holes in the book, and they must be named rather than left for whoever
+        # reads the PDF to stumble over.
+        unresolved = getattr(exporter, "_unresolved_chapters", [])
+        if unresolved:
+            logging.error(
+                "Book %s: %d chapter(s) could NOT be captured in full and are "
+                "INCOMPLETE:" % (book_id, len(unresolved))
+            )
+            for index, title, captured, declared, ratio in unresolved:
+                if declared:
+                    logging.error(
+                        "  chapter %d %s: only %d/%d chars (%.0f%%)",
+                        index + 1, title, captured, declared, ratio * 100,
+                    )
+                else:
+                    logging.error(
+                        "  chapter %d %s: nothing captured (%d chars written)",
+                        index + 1, title, captured,
+                    )
+
         await exporter.pre_process_markdown()
         title = await exporter.get_book_title()
         title = utils.format_filename(title)
+
+        # Machine-readable verdict for this book, so an automated driver can tell
+        # "finished" from "finished with holes" without re-deriving it from the
+        # log. `unresolved` and `skipped` are the real gaps; `declared_count_diff`
+        # are chapters where WeRead simply declares more words than it renders.
+        save_path_cache = os.path.join("cache", book_id)
+        try:
+            summary = {
+                "book_id": book_id,
+                "title": title,
+                "chapters": len((await exporter._load_meta_data())["chapters"]),
+                "unresolved": [
+                    {"index": i + 1, "title": t, "captured": c, "declared": d}
+                    for (i, t, c, d, _r) in getattr(exporter, "_unresolved_chapters", [])
+                ],
+                "skipped": [
+                    {"title": t, "restarts": n, "reason": r}
+                    for (t, n, r) in getattr(exporter, "_skipped_chapters", [])
+                ],
+                "declared_count_diff": [
+                    {"index": i + 1, "title": t, "captured": c, "declared": d}
+                    for (i, t, c, d, _r, _s) in getattr(exporter, "_incomplete_chapters", [])
+                ],
+            }
+            with open(os.path.join(save_path_cache, "export_summary.json"), "w") as fp:
+                fp.write(json.dumps(summary, ensure_ascii=False, indent=2))
+        except Exception:
+            logging.exception("Could not write export_summary.json for %s" % book_id)
+
         if "md" in args.output_format:
             save_path = os.path.join(output_dir, title)
             await exporter.export_markdown_files(save_path)
@@ -261,21 +312,51 @@ async def async_main():
         if "pdf" in args.output_format:
             suffix = COMPRESS_PDF_SUFFIX if args.compress_pdf_images else ""
             save_path = os.path.join(output_dir, "%s%s.pdf" % (title, suffix))
-            if os.path.isfile(save_path):
-                logging.info("File %s exist, ignore export" % save_path)
+            # Rebuild when the chapters are newer than the PDF. An existing PDF
+            # used to be kept unconditionally, which meant a chapter repaired on a
+            # retry never made it into the PDF — the md bundle was refreshed and
+            # the PDF silently stayed stale.
+            chapters_dir = os.path.join("cache", book_id, "chapters")
+            try:
+                newest_chapter = max(
+                    os.path.getmtime(os.path.join(chapters_dir, n))
+                    for n in os.listdir(chapters_dir) if n.endswith(".md")
+                )
+            except (OSError, ValueError):
+                newest_chapter = 0
+            if os.path.isfile(save_path) and os.path.getmtime(save_path) >= newest_chapter:
+                logging.info("File %s exist and is up to date, ignore export" % save_path)
             else:
                 image_format = "jpg"
                 if sys.platform == "win32":
                     image_format = "png"
-                await exporter.markdown_to_pdf(
-                    save_path,
-                    extra_css=extra_css,
-                    image_format=image_format,
-                    compress_images=args.compress_pdf_images,
-                    image_max_side=args.pdf_image_max_side,
-                    image_colors=args.pdf_image_colors,
-                )
-                logging.info("Save file %s complete" % save_path)
+                try:
+                    await exporter.markdown_to_pdf(
+                        save_path,
+                        extra_css=extra_css,
+                        image_format=image_format,
+                        compress_images=args.compress_pdf_images,
+                        image_max_side=args.pdf_image_max_side,
+                        image_colors=args.pdf_image_colors,
+                    )
+                    logging.info("Save file %s complete" % save_path)
+                except PermissionError:
+                    # Windows: the file is open in a viewer. Do not lose the work —
+                    # write beside it and say so plainly.
+                    fallback = os.path.join(output_dir, "%s-new.pdf" % title)
+                    logging.error(
+                        "Cannot write %s (open in another program); writing %s instead"
+                        % (save_path, fallback)
+                    )
+                    await exporter.markdown_to_pdf(
+                        fallback,
+                        extra_css=extra_css,
+                        image_format=image_format,
+                        compress_images=args.compress_pdf_images,
+                        image_max_side=args.pdf_image_max_side,
+                        image_colors=args.pdf_image_colors,
+                    )
+                    logging.info("Save file %s complete" % fallback)
 
         if "mobi" in args.output_format:
             if sys.platform != "linux":

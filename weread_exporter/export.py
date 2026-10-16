@@ -44,6 +44,11 @@ class WeReadExporter(object):
     # separate a transient reader failure from a chapter that simply has nothing
     # to render; past that the chapter is skipped loudly, not fatally.
     max_chapter_restarts = 2
+    # Re-fetches allowed for one chapter whose capture came back short. Each retry
+    # first re-opens the chapter from the reader's catalogue to reset the reading
+    # position (see WeReadWebPage.reopen_chapter_at_start); the longest capture
+    # seen is kept, so a retry can only ever improve on what we already have.
+    max_short_retries = 2
 
     def __init__(self, page, save_dir):
         self._page = page
@@ -58,13 +63,22 @@ class WeReadExporter(object):
         self._cover_image_path = os.path.join(self._save_dir, "cover.jpg")
         self._meta_data = {}
         self._current_chapter = 0
-        # Chapters that came back short; see _check_chapter_length().
-        self._short_retried = set()       # already re-fetched after a browser restart
-        self._short_first_capture = {}    # chapter_id -> char count of that first capture
-        self._incomplete_chapters = []    # short even after the re-fetch
+        # chapter_id -> char count of that chapter's first capture; used to tell a
+        # declared-count difference from a genuine gap.
+        self._short_first_capture = {}
+        # Short captures whose text never changed between fetches — almost always
+        # WeRead declaring more words than it renders, so only worth a warning.
+        self._incomplete_chapters = []
         # chapter_id -> browser restarts spent on it; see max_chapter_restarts.
         self._chapter_restarts = {}
         self._skipped_chapters = []       # given up on after max_chapter_restarts
+        # chapter_id -> longest capture seen, so a retry never loses ground.
+        self._best_capture = {}
+        # chapter_id -> short-capture retries spent; see max_short_retries.
+        self._short_attempts = {}
+        # Chapters still short when their retries ran out; named at the end so a
+        # hole in the book cannot pass unnoticed.
+        self._unresolved_chapters = []
 
     def _spend_chapter_restart(self, chapter, reason):
         """Count one browser restart against this chapter.
@@ -582,14 +596,54 @@ class WeReadExporter(object):
 
             file_path = self._make_chapter_path(index, chapter["id"])
             if os.path.isfile(file_path) and os.path.getsize(file_path) > 3:
-                continue
+                with open(file_path, "rb") as fp:
+                    head = fp.read(80)
+                if b"load failed" in head:
+                    # A placeholder written by an earlier failed pass is not
+                    # content: re-fetch it. Skipping it here is how a chapter
+                    # stayed a 34-byte stub across every later run of the book.
+                    logging.warning(
+                        "[%s] Chapter %s is a load-failure placeholder from an "
+                        "earlier pass; re-fetching it"
+                        % (self.__class__.__name__, chapter["title"])
+                    )
+                else:
+                    # Existing content — but an earlier pass may have captured only
+                    # part of the chapter, because the reader resumed from the
+                    # account's stored reading offset and rendered just the tail.
+                    # Judge the file now and re-fetch when it is clearly short;
+                    # otherwise a re-run would keep a truncated chapter forever.
+                    existing = open(file_path, encoding="utf-8", errors="ignore").read()
+                    verdict = self._check_chapter_length(chapter, existing)
+                    if verdict is None or verdict[0] >= self.short_chapter_ratio:
+                        continue
+                    # Seed the best-capture floor with what is already on disk, so
+                    # a re-fetch that comes back worse cannot destroy text we
+                    # already had (this is how chapter 7 of 《销售读心术》 lost its
+                    # 9586 chars to a 477-char render).
+                    if len(existing) > len(self._best_capture.get(chapter["id"], "")):
+                        self._best_capture[chapter["id"]] = existing
+                    logging.warning(
+                        "[%s] Chapter %s on disk is short (%d chars captured vs %d "
+                        "declared, %.0f%%); re-fetching it"
+                        % (
+                            self.__class__.__name__,
+                            chapter["title"],
+                            verdict[1],
+                            verdict[2],
+                            verdict[0] * 100,
+                        )
+                    )
             logging.info(
                 "[%s] File %s not exist" % (self.__class__.__name__, file_path)
             )
 
             time0 = 0
             chapter_done = False
-            for attempt in range(3):
+            # Room for the ordinary goto retries plus the short-capture retries,
+            # which re-navigate the same chapter after resetting the reader's
+            # position (see the short-capture branch below).
+            for attempt in range(self.max_short_retries + 3):
                 time0 = time.time()
                 try:
                     # No hard outer timeout — _check_next_page handles per-page timeouts internally.
@@ -650,74 +704,134 @@ class WeReadExporter(object):
                     # canvas never rendered it used to raise out of this loop and
                     # abort the whole book instead of retrying the chapter.
                     markdown = await self._page.get_markdown()
+                    # Never lose ground: keep the longest capture seen for this
+                    # chapter, because a retry can legitimately come back shorter
+                    # than an earlier attempt.
+                    if len(markdown) > len(self._best_capture.get(chapter["id"], "")):
+                        self._best_capture[chapter["id"]] = markdown
+
+                    # A short capture means the reader resumed from the account's
+                    # stored reading offset and rendered only the tail — which is
+                    # how 《销售读心术》 chapters 3/6/7 came back at 14%/26%/2%,
+                    # each starting mid-paragraph with no heading. Retry, but
+                    # first re-open the chapter from the reader's catalogue so it
+                    # starts at chapter begin; re-navigating the URL alone leaves
+                    # the offset untouched.
+                    verdict = self._check_chapter_length(chapter, markdown)
+                    if verdict is not None and verdict[0] < self.short_chapter_ratio:
+                        ratio, captured, declared = verdict
+                        spent = self._short_attempts.get(chapter["id"], 0)
+                        self._short_first_capture.setdefault(chapter["id"], captured)
+                        if spent < self.max_short_retries:
+                            self._short_attempts[chapter["id"]] = spent + 1
+                            logging.warning(
+                                "[%s] Chapter %s came back short: %d chars vs %d "
+                                "declared (%.0f%%); resetting the reading position "
+                                "and re-fetching (%d/%d)"
+                                % (
+                                    self.__class__.__name__,
+                                    chapter["title"],
+                                    captured,
+                                    declared,
+                                    ratio * 100,
+                                    spent + 1,
+                                    self.max_short_retries,
+                                )
+                            )
+                            try:
+                                await self._page.reopen_chapter_at_start(chapter)
+                            except Exception:
+                                logging.exception(
+                                    "[%s] Resetting the reading position for chapter "
+                                    "%s failed; retrying anyway"
+                                    % (self.__class__.__name__, chapter["title"])
+                                )
+                            # Same page, next loop: goto_chapter re-reads the
+                            # chapter, now from its beginning.
+                            continue
+                        # Retries exhausted. Report it either way, tagging whether
+                        # the text moved between attempts: a capture that never
+                        # changed usually means WeRead's declared count is simply
+                        # higher than what it renders, while one that changed is a
+                        # genuine gap worth a human look.
+                        first = self._short_first_capture.get(chapter["id"])
+                        # "Unchanged between fetches" only means WeRead declares
+                        # more than it renders when the capture is *close* to the
+                        # declared count. A capture stuck at a few percent is a
+                        # real gap no matter how reproducibly it repeats.
+                        stable = (
+                            first is not None
+                            and abs(captured - first) <= 3
+                            and ratio >= 0.90
+                        )
+                        note = (
+                            "unchanged across every fetch — WeRead's declared count "
+                            "is probably just higher than the rendered text"
+                            if stable
+                            else "changed between fetches (%s -> %d chars) — likely "
+                            "a real gap" % (first, captured)
+                        )
+                        logging.error(
+                            "[%s] Chapter %s is still short after %d re-fetches: %d "
+                            "chars captured vs %d declared (%.0f%%); %s. Keeping the "
+                            "longest capture (%d chars)"
+                            % (
+                                self.__class__.__name__,
+                                chapter["title"],
+                                spent,
+                                captured,
+                                declared,
+                                ratio * 100,
+                                note,
+                                len(self._best_capture.get(chapter["id"], "")),
+                            )
+                        )
+                        kept = self._best_capture.get(chapter["id"], markdown)
+                        markdown = kept
+                        kept_len = self._count_content_chars(kept)
+                        if not stable:
+                            # Record what was actually kept, not the last (possibly
+                            # worse) attempt's count.
+                            self._unresolved_chapters.append(
+                                (index, chapter["title"], kept_len, declared,
+                                 kept_len / declared if declared else 0.0)
+                            )
+                        else:
+                            self._incomplete_chapters.append(
+                                (index, chapter["title"], captured, declared, ratio, True)
+                            )
                     chapter_done = True
                     break
 
             if not chapter_done:
-                logging.warning(
-                    "[%s] Load chapter %s failed after 3 retries, writing placeholder and skipping"
-                    % (self.__class__.__name__, chapter["title"])
-                )
-                with open(file_path, "wb") as fp:
-                    fp.write(b"<!-- load failed: max retries -->")
-                continue
-
-            # A page turn that silently did not advance yields a chapter with a
-            # correct-looking tail but a short body. Re-fetch it once on a fresh
-            # browser; only report it if it is still short after that.
-            verdict = self._check_chapter_length(chapter, markdown)
-            if verdict is not None:
-                ratio, captured, declared = verdict
-                if ratio < self.short_chapter_ratio:
-                    if chapter["id"] not in self._short_retried:
-                        self._short_retried.add(chapter["id"])
-                        self._short_first_capture[chapter["id"]] = captured
-                        logging.warning(
-                            "[%s] Chapter %s looks incomplete: %d chars captured vs "
-                            "%d declared (%.0f%%); restarting the browser to re-fetch it"
-                            % (
-                                self.__class__.__name__,
-                                chapter["title"],
-                                captured,
-                                declared,
-                                ratio * 100,
-                            )
-                        )
-                        # Nothing written yet, so the retry re-fetches this chapter.
-                        raise utils.LoadChapterFailedError(
-                            "Chapter %s is short: %d/%d chars"
-                            % (chapter["title"], captured, declared)
-                        )
-                    # Still short on the second fetch. Whether that means a real
-                    # gap depends on whether the text moved at all: a re-fetch
-                    # that returns the same length says WeRead's declared count is
-                    # simply higher than what the page renders (seen on healthy
-                    # chapters), while a changed-but-still-short result points at
-                    # a genuine gap. Report either way, tagged with which.
-                    first = self._short_first_capture.get(chapter["id"])
-                    stable = first is not None and abs(captured - first) <= 3
-                    note = (
-                        "unchanged across two fetches — WeRead's declared count is "
-                        "probably just higher than the rendered text"
-                        if stable
-                        else "changed after re-fetching (%s -> %d chars) — likely a "
-                        "real gap" % (first, captured)
+                # Keep whatever was captured rather than blanking the chapter. A
+                # partial capture still carries real text, and writing a stub over
+                # it silently loses that text — which is how 《销售读心术》 chapter 7
+                # went from 441 captured chars down to a 34-byte placeholder.
+                best = self._best_capture.get(chapter["id"])
+                if best:
+                    logging.error(
+                        "[%s] Chapter %s never completed; keeping the longest capture "
+                        "(%d chars) instead of a placeholder"
+                        % (self.__class__.__name__, chapter["title"], len(best))
                     )
+                    with open(file_path, "wb") as fp:
+                        fp.write(best.encode("utf-8", errors="replace"))
+                    self._unresolved_chapters.append(
+                        (index, chapter["title"], len(best), None, None)
+                    )
+                else:
                     logging.warning(
-                        "[%s] Chapter %s is still short: %d chars captured vs %d "
-                        "declared (%.0f%%); %s"
-                        % (
-                            self.__class__.__name__,
-                            chapter["title"],
-                            captured,
-                            declared,
-                            ratio * 100,
-                            note,
-                        )
+                        "[%s] Load chapter %s failed after all retries, writing "
+                        "placeholder and skipping"
+                        % (self.__class__.__name__, chapter["title"])
                     )
-                    self._incomplete_chapters.append(
-                        (index, chapter["title"], captured, declared, ratio, stable)
+                    with open(file_path, "wb") as fp:
+                        fp.write(b"<!-- load failed: max retries -->")
+                    self._unresolved_chapters.append(
+                        (index, chapter["title"], 0, None, None)
                     )
+                continue
 
             # An image-only chapter has no canvas, so its title was never drawn
             # either — put it back as a heading, otherwise the chapter reaches md

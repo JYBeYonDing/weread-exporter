@@ -840,6 +840,65 @@ class WeReadWebPage(object):
             }"""
         )
 
+    async def reopen_chapter_at_start(self, chapter):
+        """Force the reader to render `chapter` from its beginning.
+
+        WeRead restores the account's stored reading offset for the chapter, so a
+        chapter whose saved position sits near its end renders only the tail and
+        then reports "下一章" straight away. 《销售读心术》 chapters 3/6/7 came back
+        at 14%/26%/2% of their declared length this way, and the text always
+        started mid-paragraph with no heading — the reader had simply resumed
+        where it left off. Measured on the real page: scrolling the window and
+        every scrollable container to the top changes nothing, a plain URL
+        re-navigation changes nothing, but re-entering the chapter from the
+        reader's own catalogue re-renders it (captured text grew 477 -> 1437
+        chars, canvas 3307 -> 5515px). That catalogue click is what this does.
+
+        Returns True when a catalogue entry for the chapter was found and
+        clicked; False means the caller should fall back to a plain re-navigation.
+        """
+        title = (chapter.get("title") or "").strip()
+        if not title:
+            return False
+        try:
+            await self._page.evaluate(
+                """() => {
+                    const b = [...document.querySelectorAll('button, div, span')]
+                        .find(e => (e.innerText || '').trim() === '目录');
+                    if (b) b.click();
+                }"""
+            )
+        except Exception:
+            logging.exception(
+                "[%s] Opening the catalogue failed" % self.__class__.__name__
+            )
+            return False
+        await asyncio.sleep(2)
+        try:
+            clicked = await self._page.evaluate(
+                """(title) => {
+                    const all = [...document.querySelectorAll(
+                        '.readerCatalog_list_item, .readerCatalog_list_item_default, li, div, span')];
+                    const hit = all.filter(e => (e.innerText || '').trim() === title);
+                    if (!hit.length) return false;
+                    // innermost match wins: the outer list rows repeat the title
+                    hit[hit.length - 1].click();
+                    return true;
+                }""",
+                title,
+            )
+        except Exception:
+            logging.exception(
+                "[%s] Clicking the catalogue entry failed" % self.__class__.__name__
+            )
+            return False
+        if clicked:
+            logging.info(
+                "[%s] Re-opened chapter %s from the catalogue to reset the "
+                "reading position" % (self.__class__.__name__, title)
+            )
+        return bool(clicked)
+
     async def _advance_to_next_page(self, page_timeout):
         """Click "下一页" and wait for the canvas to re-render the next page."""
         await self._page.evaluate(
