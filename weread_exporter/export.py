@@ -684,6 +684,15 @@ class WeReadExporter(object):
                         and isinstance(ex, _pyppeteer_errors.NetworkError)
                         and ("Session closed" in err_msg or "Target closed" in err_msg)
                     )
+                    # A dropped CDP link surfaces as a plain "Protocol error ...
+                    # Target closed." once pyppeteer's teardown settles the
+                    # pending callbacks (see patch_connection_close). Match on the
+                    # text too, otherwise that case would burn the ordinary
+                    # three in-process attempts on a browser that is already gone.
+                    if not is_browser_dead and (
+                        "Target closed" in err_msg or "Protocol error" in err_msg
+                    ):
+                        is_browser_dead = True
                     if is_browser_dead:
                         # Budget the restart against this chapter alone, so one
                         # chapter's trouble cannot abort a book that is otherwise

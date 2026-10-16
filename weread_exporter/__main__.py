@@ -31,6 +31,77 @@ def patch_generateRequestHash():
     network_manager.generateRequestHash = patched_generateRequestHash
 
 
+def patch_connection_close():
+    """Stop pyppeteer's Connection._on_close from wedging the whole process.
+
+    pyppeteer 2.0.0 is unmaintained and has a hole in its teardown path, hit on
+    every CDP link drop. `Connection._async_send` reacts to a closed socket by
+    resolving its own callback and then calling `dispose()`:
+
+        callback.set_result(None)      # that future is now DONE
+        await self.dispose()           # -> _on_close()
+
+    `_on_close` then sweeps *every* callback and calls `set_exception` on each —
+    including the one just resolved — which raises `InvalidStateError` on an
+    already-settled future. The raise aborts the loop before `self._callbacks`
+    is cleared, so the callbacks after it are never resolved *or* rejected.
+    Anything awaiting one of them waits forever, and no timeout can help because
+    the future never completes: the process stays alive with a dead CDP link.
+
+    Observed live twice on 《赢单九问》 (02:48 and 07:27): same
+    `Task exception was never retrieved ... InvalidStateError('invalid state')`,
+    each time leaving the export stuck — once for 4h46m — at 9/15 chapters.
+
+    This wraps `_on_close` so every callback is settled exactly once and no
+    failure can escape the loop. With the futures properly rejected, the
+    pending `page.goto` raises instead of hanging, and the exporter's own retry
+    (browser restart) recovers by itself.
+    """
+    from pyppeteer import connection as pyppeteer_connection
+
+    async def safe_on_close(self):
+        if self._closeCallback:
+            try:
+                self._closeCallback()
+            finally:
+                self._closeCallback = None
+
+        for callback in list(self._callbacks.values()):
+            try:
+                # done() also covers cancelled futures; set_exception raises on both.
+                if callback.done():
+                    continue
+                callback.set_exception(
+                    pyppeteer_connection._rewriteError(
+                        callback.error,
+                        "Protocol error %s: Target closed." % callback.method,
+                    )
+                )
+            except Exception:
+                logging.exception(
+                    "Swallowing error while settling CDP callback %s"
+                    % getattr(callback, "method", "?")
+                )
+        self._callbacks.clear()
+
+        for session in list(self._sessions.values()):
+            try:
+                session._on_closed()
+            except Exception:
+                logging.exception("Swallowing error while closing CDP session")
+        self._sessions.clear()
+
+        if hasattr(self, "connection"):
+            try:
+                await self.connection.close()
+            except Exception:
+                logging.exception("Swallowing error while closing the CDP socket")
+        if not self._recv_fut.done():
+            self._recv_fut.cancel()
+
+    pyppeteer_connection.Connection._on_close = safe_on_close
+
+
 async def async_main():
     from . import export, utils, webpage
 
@@ -387,6 +458,7 @@ def main():
     if sys.platform == "win32":
         patch_windows()
     patch_generateRequestHash()
+    patch_connection_close()
     logging.root.level = logging.INFO
     handler = logging.StreamHandler()
     fmt = "[%(asctime)s][%(levelname)s]%(message)s"
