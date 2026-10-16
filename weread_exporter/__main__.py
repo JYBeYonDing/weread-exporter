@@ -142,7 +142,21 @@ async def async_main():
         if not os.path.isdir(output_dir):
             os.mkdir(output_dir)
         exporter = export.WeReadExporter(page, save_path)
-        max_retries = 10
+        # Restarts are budgeted per chapter (see WeReadExporter.max_chapter_restarts),
+        # so the book-wide allowance only needs to be a backstop against a loop
+        # that never converges — sized off the real chapter count rather than the
+        # flat 10 that used to abort a book whose chapters had each been restarted
+        # once for unrelated reasons.
+        try:
+            chapter_total = await exporter.get_chapter_count()
+        except Exception:
+            logging.exception("Cannot read chapter count for book %s" % book_id)
+            chapter_total = 10
+        max_retries = chapter_total * max(2, export.WeReadExporter.max_chapter_restarts) + 5
+        logging.info(
+            "Book %s has %d chapters; restart budget for this book is %d"
+            % (book_id, chapter_total, max_retries)
+        )
         for retry_count in range(max_retries):
             try:
                 await page.launch(
@@ -215,6 +229,18 @@ async def async_main():
                     ratio * 100,
                     " [unchanged after re-fetch]" if is_stable else " [changed after re-fetch]",
                 )
+
+        # Chapters that used up their restart allowance. The book still exports;
+        # these are the holes in it and must be named, not left to be discovered
+        # by reading the PDF.
+        skipped = getattr(exporter, "_skipped_chapters", [])
+        if skipped:
+            logging.error(
+                "Book %s: %d chapter(s) were SKIPPED after exhausting their restart "
+                "allowance and left as placeholders:" % (book_id, len(skipped))
+            )
+            for title, used, reason in skipped:
+                logging.error("  %s (%d restarts): %s", title, used, reason)
 
         await exporter.pre_process_markdown()
         title = await exporter.get_book_title()

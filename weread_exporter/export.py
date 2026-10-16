@@ -34,7 +34,16 @@ class WeReadExporter(object):
     # Distribution notice WeRead prints on the copyright page. Any line carrying
     # one of these is dropped from every chapter before any format is written,
     # so md/epub/pdf/txt all come out without it.
-    drop_line_markers = ("授权微信读书进行制作与发行",)
+    drop_line_markers = ("授权微信读书","微信读书出品")
+    # Browser restarts allowed for one chapter before it is written off. Rationale:
+    # a restart is the only cure for a wedged CDP link, but it is also the only
+    # thing that used to cost a chapter its place in the book — restarts were
+    # budgeted per *book*, so unrelated chapters' failures could exhaust the
+    # allowance and abort the export with everything but one chapter captured
+    # (《销售是个专业活》 died at 61/62 this way). Two attempts is enough to
+    # separate a transient reader failure from a chapter that simply has nothing
+    # to render; past that the chapter is skipped loudly, not fatally.
+    max_chapter_restarts = 2
 
     def __init__(self, page, save_dir):
         self._page = page
@@ -53,6 +62,44 @@ class WeReadExporter(object):
         self._short_retried = set()       # already re-fetched after a browser restart
         self._short_first_capture = {}    # chapter_id -> char count of that first capture
         self._incomplete_chapters = []    # short even after the re-fetch
+        # chapter_id -> browser restarts spent on it; see max_chapter_restarts.
+        self._chapter_restarts = {}
+        self._skipped_chapters = []       # given up on after max_chapter_restarts
+
+    def _spend_chapter_restart(self, chapter, reason):
+        """Count one browser restart against this chapter.
+
+        Returns True once the chapter has used up its allowance and should be
+        skipped instead of retried; the caller then writes a placeholder so the
+        book keeps going.
+        """
+        chapter_id = chapter["id"]
+        used = self._chapter_restarts.get(chapter_id, 0) + 1
+        self._chapter_restarts[chapter_id] = used
+        if used >= self.max_chapter_restarts:
+            logging.error(
+                "[%s] Chapter %s failed %d times (%s); writing a placeholder and "
+                "moving on — the rest of the book is unaffected"
+                % (self.__class__.__name__, chapter["title"], used, reason)
+            )
+            self._skipped_chapters.append((chapter["title"], used, reason))
+            return True
+        logging.warning(
+            "[%s] Chapter %s needs a browser restart (%d/%d): %s"
+            % (
+                self.__class__.__name__,
+                chapter["title"],
+                used,
+                self.max_chapter_restarts,
+                reason,
+            )
+        )
+        return False
+
+    async def get_chapter_count(self):
+        """Number of chapters WeRead declares for this book."""
+        meta_data = await self._load_meta_data()
+        return len(meta_data["chapters"])
 
     @staticmethod
     def _count_content_chars(text):
@@ -584,15 +631,12 @@ class WeReadExporter(object):
                         and ("Session closed" in err_msg or "Target closed" in err_msg)
                     )
                     if is_browser_dead:
-                        logging.warning(
-                            "[%s] Chapter %s (attempt %d) needs a browser restart: %s"
-                            % (
-                                self.__class__.__name__,
-                                chapter["title"],
-                                attempt + 1,
-                                err_msg,
-                            )
-                        )
+                        # Budget the restart against this chapter alone, so one
+                        # chapter's trouble cannot abort a book that is otherwise
+                        # complete. Skipping (chapter_done stays False) drops
+                        # through to the placeholder path below.
+                        if self._spend_chapter_restart(chapter, err_msg):
+                            break
                         raise utils.LoadChapterFailedError(
                             "Chapter %s needs a browser restart: %s"
                             % (chapter["title"], err_msg)
@@ -674,6 +718,18 @@ class WeReadExporter(object):
                     self._incomplete_chapters.append(
                         (index, chapter["title"], captured, declared, ratio, stable)
                     )
+
+            # An image-only chapter has no canvas, so its title was never drawn
+            # either — put it back as a heading, otherwise the chapter reaches md
+            # and PDF as a run of anonymous pictures.
+            if getattr(self._page, "_image_only_chapter", False):
+                title = (chapter.get("title") or "").strip()
+                if title and not re.search(r"(?m)^#{1,6}\s", markdown):
+                    logging.info(
+                        "[%s] Image-only chapter %s has no heading; adding its title"
+                        % (self.__class__.__name__, chapter["title"])
+                    )
+                    markdown = "## %s\n\n%s" % (title, markdown)
 
             logging.info(
                 "[%s] Export chapter %s to %s"

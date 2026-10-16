@@ -46,6 +46,11 @@ class WeReadWebPage(object):
         # page, so it survives the browser restarts the exporter performs.
         self._page_turn_stalls = {}
         self._chapter_id = None
+        # Set when the current chapter had no text layer at all and was salvaged
+        # by harvesting its <img> elements instead (see _check_next_page). The
+        # exporter uses it to give such a chapter its title as a heading, since
+        # no canvas means no title was drawn either.
+        self._image_only_chapter = False
         self._load_cookie()
         self._url = ""
 
@@ -870,9 +875,41 @@ class WeReadWebPage(object):
             except Exception:
                 has_text = False
             if not has_text:
-                raise utils.ChapterContentMissingError(
-                    "Chapter content never rendered (reader fetch failed?)"
-                )
+                # A chapter WeRead renders as pure images never gets a canvas at
+                # all — the reader only paints text through canvas, and an
+                # image-only page has none — so the hook waits forever. Such
+                # pages do exist as a chapter's whole content (《销售是个专业活》
+                # ends with a 9-page scanned 后记). Before declaring the chapter
+                # unrenderable, ask the hook to harvest the <img> elements the
+                # reader already laid out; that is real content, not a failure.
+                try:
+                    await self._page.evaluate(
+                        "canvasContextHandler.updateMarkdown();"
+                    )
+                    has_text = await self._page.evaluate(
+                        "(typeof canvasContextHandler !== 'undefined' && "
+                        "canvasContextHandler.data.markdown || '').length > 0"
+                    )
+                except Exception:
+                    has_text = False
+                if has_text:
+                    logging.info(
+                        "[%s] No canvas drawn but images captured — treating as "
+                        "an image-only chapter" % self.__class__.__name__
+                    )
+                    self._image_only_chapter = True
+                    # Mark the page done so get_markdown() does not sit through
+                    # its own 15s wait for a canvas that will never be drawn.
+                    try:
+                        await self._page.evaluate(
+                            "canvasContextHandler.data.complete = true;"
+                        )
+                    except Exception:
+                        pass
+                else:
+                    raise utils.ChapterContentMissingError(
+                        "Chapter content never rendered (reader fetch failed?)"
+                    )
 
         # Legacy page-turn UI: poll briefly; missing footer is normal for new UI.
         footer_wait_ms = 3000
@@ -951,6 +988,7 @@ class WeReadWebPage(object):
         # await self.clear_cache()
         await self.pre_load_page()
         self._chapter_id = chapter_id
+        self._image_only_chapter = False
         self._url = self._get_chapter_url(chapter_id)
         # domcontentloaded avoids hanging on late analytics/fonts under interception.
         logging.info("[%s] Navigate to %s" % (self.__class__.__name__, self._url))
