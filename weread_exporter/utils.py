@@ -18,6 +18,15 @@ class LoadChapterFailedError(RuntimeError):
     pass
 
 
+class PageTurnStalledError(LoadChapterFailedError):
+    """A page turn (the "下一页" click) never completed.
+
+    Subclasses LoadChapterFailedError so the existing restart-the-browser path
+    picks it up: the stall leaves the CDP round-trip hanging, and only a fresh
+    browser is known to be clean again.
+    """
+
+
 class InvalidUserError(RuntimeError):
     pass
 

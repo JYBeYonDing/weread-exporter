@@ -479,20 +479,31 @@ class WeReadExporter(object):
                     raise ex
                 except Exception as ex:
                     err_msg = str(ex)
-                    # Detect a dead browser session — no point retrying with the same dead browser
-                    is_browser_dead = (
+                    # Detect a dead browser session — no point retrying with the
+                    # same dead browser. A stalled page turn belongs here too:
+                    # it leaves the CDP link wedged, so a retry on the same
+                    # browser would stall the same way. The browser is restarted
+                    # and the chapter retried; a second stall then falls back.
+                    is_browser_dead = isinstance(
+                        ex, utils.PageTurnStalledError
+                    ) or (
                         _pyppeteer_errors
                         and isinstance(ex, _pyppeteer_errors.NetworkError)
                         and ("Session closed" in err_msg or "Target closed" in err_msg)
                     )
                     if is_browser_dead:
                         logging.warning(
-                            "[%s] Browser session died on chapter %s (attempt %d), "
-                            "requesting browser restart"
-                            % (self.__class__.__name__, chapter["title"], attempt + 1)
+                            "[%s] Chapter %s (attempt %d) needs a browser restart: %s"
+                            % (
+                                self.__class__.__name__,
+                                chapter["title"],
+                                attempt + 1,
+                                err_msg,
+                            )
                         )
                         raise utils.LoadChapterFailedError(
-                            "Browser session closed during chapter %s" % chapter["title"]
+                            "Chapter %s needs a browser restart: %s"
+                            % (chapter["title"], err_msg)
                         )
                     logging.exception(
                         "[%s] Go to chapter %s failed (attempt %d/3)"

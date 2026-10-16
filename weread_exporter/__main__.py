@@ -149,6 +149,20 @@ async def async_main():
             await page.close()
             continue
 
+        # Surface chapters that only got captured because a page turn stalled
+        # twice (browser restart did not clear it). They are kept so the book
+        # still exports, but they may be short — say so loudly rather than
+        # handing over a silently incomplete book.
+        stalled = sorted(
+            cid for cid, n in getattr(page, "_page_turn_stalls", {}).items() if n > 1
+        )
+        if stalled:
+            logging.warning(
+                "Book %s: page turn stalled twice in %d chapter(s), kept as captured "
+                "and they may be INCOMPLETE: %s"
+                % (book_id, len(stalled), ", ".join(str(c) for c in stalled))
+            )
+
         await exporter.pre_process_markdown()
         title = await exporter.get_book_title()
         title = utils.format_filename(title)

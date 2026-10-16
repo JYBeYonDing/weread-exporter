@@ -21,6 +21,11 @@ class WeReadWebPage(object):
 
     root_url = "https://weread.qq.com"
     window_size = (1920, 1080)
+    # Hard ceiling for one "下一页" turn (click + canvas re-render). Without it a
+    # stalled turn hangs for good: pyppeteer's click has no timeout of its own.
+    page_turn_timeout = 60
+    # Ceiling for tearing a browser down; a wedged CDP link must not block it.
+    browser_close_timeout = 30
 
     def __init__(self, book_id, cookie_path=None, webcache_path=None):
         self._book_id = book_id
@@ -37,6 +42,10 @@ class WeReadWebPage(object):
         self._browser = None
         self._page = None
         self._request_interception_ready = False
+        # Per-chapter page-turn stall count. Lives on this object, not on the
+        # page, so it survives the browser restarts the exporter performs.
+        self._page_turn_stalls = {}
+        self._chapter_id = None
         self._load_cookie()
         self._url = ""
 
@@ -405,9 +414,33 @@ class WeReadWebPage(object):
         self._page.on("console", self.handle_log)
 
     async def close(self):
-        """Close browser and reset page-related state."""
-        if self._browser:
-            await self._browser.close()
+        """Close browser and reset page-related state.
+
+        Bounded: after a stalled page turn the CDP link can be wedged, and a
+        graceful close would then hang forever — which would strand the whole
+        export before the retry that is supposed to recover it.
+        """
+        if not self._browser:
+            return
+        try:
+            await asyncio.wait_for(
+                self._browser.close(), timeout=self.browser_close_timeout
+            )
+        except Exception as ex:
+            logging.warning(
+                "[%s] Browser close did not finish (%s); killing the process tree"
+                % (self.__class__.__name__, type(ex).__name__)
+            )
+            proc = getattr(self._browser, "process", None)
+            if proc is not None:
+                try:
+                    proc.kill()
+                except Exception:
+                    logging.exception(
+                        "[%s] Killing the browser process failed"
+                        % self.__class__.__name__
+                    )
+        finally:
             self._browser = self._page = None
             self._request_interception_ready = False
 
@@ -802,6 +835,19 @@ class WeReadWebPage(object):
             }"""
         )
 
+    async def _advance_to_next_page(self, page_timeout):
+        """Click "下一页" and wait for the canvas to re-render the next page."""
+        await self._page.evaluate(
+            """() => {
+                canvasContextHandler.data.complete = false;
+                canvasContextHandler.data.markdown += '\\n\\n';
+            }"""
+        )
+        await self._page.click("button.readerFooter_button")
+        return await self.wait_for_canvas_complete(
+            timeout=min(40, max(15, page_timeout))
+        )
+
     async def _check_next_page(self, page_timeout=30):
         """Wait for chapter content, then flip pages if legacy footer UI exists.
 
@@ -829,16 +875,37 @@ class WeReadWebPage(object):
             result = await self._get_footer_button_text()
             if result == "下一页":
                 logging.info("[%s] Go to next page" % self.__class__.__name__)
-                await self._page.evaluate(
-                    """() => {
-                        canvasContextHandler.data.complete = false;
-                        canvasContextHandler.data.markdown += '\\n\\n';
-                    }"""
-                )
-                await self._page.click("button.readerFooter_button")
-                ready = await self.wait_for_canvas_complete(
-                    timeout=min(40, max(15, page_timeout))
-                )
+                try:
+                    ready = await asyncio.wait_for(
+                        self._advance_to_next_page(page_timeout),
+                        timeout=self.page_turn_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    # The click round-trip can wedge; the page never reports
+                    # back and nothing here would ever time out on its own.
+                    chapter = self._chapter_id
+                    seen = self._page_turn_stalls.get(chapter, 0) + 1
+                    self._page_turn_stalls[chapter] = seen
+                    if seen == 1:
+                        logging.warning(
+                            "[%s] Page turn in chapter %s did not finish within %ds; "
+                            "restarting the browser and retrying the chapter"
+                            % (
+                                self.__class__.__name__,
+                                chapter,
+                                self.page_turn_timeout,
+                            )
+                        )
+                        raise utils.PageTurnStalledError(
+                            "Page turn stalled in chapter %s" % chapter
+                        )
+                    logging.error(
+                        "[%s] Page turn in chapter %s stalled again (%d times) after a "
+                        "browser restart; keeping the captured text and moving on — "
+                        "this chapter may be INCOMPLETE"
+                        % (self.__class__.__name__, chapter, seen)
+                    )
+                    return
                 if not ready:
                     break
             elif result in ("下一章", "全书已读完", "全书完", "标记读完", "已读完所有章节"):
@@ -865,6 +932,7 @@ class WeReadWebPage(object):
         logging.info("[%s] Go to chapter %s" % (self.__class__.__name__, chapter_id))
         # await self.clear_cache()
         await self.pre_load_page()
+        self._chapter_id = chapter_id
         self._url = self._get_chapter_url(chapter_id)
         # domcontentloaded avoids hanging on late analytics/fonts under interception.
         logging.info("[%s] Navigate to %s" % (self.__class__.__name__, self._url))
