@@ -31,6 +31,10 @@ class WeReadExporter(object):
     # Chapters this small are unreliable to judge (front matter, part dividers)
     # and are skipped rather than reported.
     short_chapter_min_words = 200
+    # Distribution notice WeRead prints on the copyright page. Any line carrying
+    # one of these is dropped from every chapter before any format is written,
+    # so md/epub/pdf/txt all come out without it.
+    drop_line_markers = ("授权微信读书进行制作与发行",)
 
     def __init__(self, page, save_dir):
         self._page = page
@@ -63,6 +67,22 @@ class WeReadExporter(object):
         text = re.sub(r"`{1,3}", "", text)                    # highlight / code ticks
         text = re.sub(r"^-{3,}\s*$", "", text, flags=re.M)    # horizontal rules
         return len(re.sub(r"\s+", "", text))
+
+    @classmethod
+    def _drop_distribution_notice(cls, text):
+        """Remove whole lines carrying WeRead's distribution notice.
+
+        The notice sits on the copyright page, e.g. "本书由<出版方>授权微信读书
+        进行制作与发行". Dropping the line (not just the phrase) leaves no orphan
+        punctuation behind; surrounding blank lines collapse in the reflow that
+        follows.
+        """
+        kept = [
+            line
+            for line in text.split("\n")
+            if not any(marker in line for marker in cls.drop_line_markers)
+        ]
+        return "\n".join(kept)
 
     def _check_chapter_length(self, chapter, markdown):
         """Return (ratio, captured, declared) when the chapter is worth judging.
@@ -123,6 +143,8 @@ class WeReadExporter(object):
                 continue
             with open(chapter_path, "rb") as fp:
                 text = fp.read().decode()
+
+            text = self._drop_distribution_notice(text)
 
             output = ""
             code_mode = False
