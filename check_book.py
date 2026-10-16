@@ -39,6 +39,8 @@ import sys
 # Chapters smaller than this are unreliable to judge (front matter, part
 # dividers) — the same rule the exporter applies.
 DEFAULT_MIN_WORDS = 200
+# Shortfalls smaller than this many characters are never treated as a lost chapter.
+DEFAULT_MIN_SHORTFALL = 500
 
 
 def strip_count(text):
@@ -60,7 +62,8 @@ def load_summary(cache_dir):
         return None
 
 
-def check(book_id, hard_ratio=0.90, warn_ratio=0.97, min_words=DEFAULT_MIN_WORDS, root="."):
+def check(book_id, hard_ratio=0.90, warn_ratio=0.97, min_words=DEFAULT_MIN_WORDS,
+          min_shortfall=500, root="."):
     cache_dir = os.path.join(root, "cache", book_id)
     meta_path = os.path.join(cache_dir, "meta.json")
     if not os.path.isfile(meta_path):
@@ -88,7 +91,13 @@ def check(book_id, hard_ratio=0.90, warn_ratio=0.97, min_words=DEFAULT_MIN_WORDS
             continue
         got = strip_count(text)
         ratio = got / declared
-        if ratio < hard_ratio:
+        # A chapter can be a few percent short of the declared count and still be
+        # complete — WeRead declares 459 words for 优势谈判's 内容简介 and renders
+        # 413, reproducibly. What separates that from a real gap is the absolute
+        # shortfall: measured truncations lost 18k-27k characters, benign
+        # differences lose a few dozen. Requiring both a low ratio and a large
+        # absolute gap keeps the gate from failing a whole book over a blurb.
+        if ratio < hard_ratio and (declared - got) >= min_shortfall:
             problems.append(
                 "chapter %d %s: %d/%d chars (%.0f%%)" % (index + 1, ch_title, got, declared, ratio * 100)
             )
@@ -139,11 +148,13 @@ def main():
     ap.add_argument("--hard-ratio", type=float, default=0.90)
     ap.add_argument("--warn-ratio", type=float, default=0.97)
     ap.add_argument("--min-words", type=int, default=DEFAULT_MIN_WORDS)
+    ap.add_argument("--min-shortfall", type=int, default=DEFAULT_MIN_SHORTFALL)
     ap.add_argument("--root", default=".")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
-    r = check(args.book_id, args.hard_ratio, args.warn_ratio, args.min_words, args.root)
+    r = check(args.book_id, args.hard_ratio, args.warn_ratio, args.min_words,
+              args.min_shortfall, args.root)
     if r["state"] == "not-started":
         print("NOT-STARTED %s: %s" % (args.book_id, r["reason"]))
         return 1
