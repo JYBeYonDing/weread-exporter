@@ -23,6 +23,15 @@ current_path = os.path.dirname(os.path.abspath(__file__))
 
 
 class WeReadExporter(object):
+    # A chapter whose captured text falls this far below the word count WeRead
+    # declares is treated as incomplete. Calibrated on real exports: the ratio
+    # (whitespace/markup stripped) sits at 1.000-1.013 for months of healthy
+    # chapters, while genuinely truncated ones land at 0.95 and below.
+    short_chapter_ratio = 0.97
+    # Chapters this small are unreliable to judge (front matter, part dividers)
+    # and are skipped rather than reported.
+    short_chapter_min_words = 200
+
     def __init__(self, page, save_dir):
         self._page = page
         self._save_dir = save_dir
@@ -36,6 +45,40 @@ class WeReadExporter(object):
         self._cover_image_path = os.path.join(self._save_dir, "cover.jpg")
         self._meta_data = {}
         self._current_chapter = 0
+        # Chapters that came back short; see _check_chapter_length().
+        self._short_retried = set()       # already re-fetched after a browser restart
+        self._short_first_capture = {}    # chapter_id -> char count of that first capture
+        self._incomplete_chapters = []    # short even after the re-fetch
+
+    @staticmethod
+    def _count_content_chars(text):
+        """Count visible characters: drop the hook's markdown scaffolding and whitespace.
+
+        WeRead's per-chapter wordCount turns out to match exactly this count
+        (ratio ~1.00) — not the raw file size, which carries newlines, spaces and
+        the `## `/backtick/`---` markers the canvas hook emits.
+        """
+        text = re.sub(r"^#{1,6}\s*", "", text, flags=re.M)   # heading markers
+        text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)      # image refs
+        text = re.sub(r"`{1,3}", "", text)                    # highlight / code ticks
+        text = re.sub(r"^-{3,}\s*$", "", text, flags=re.M)    # horizontal rules
+        return len(re.sub(r"\s+", "", text))
+
+    def _check_chapter_length(self, chapter, markdown):
+        """Return (ratio, captured, declared) when the chapter is worth judging.
+
+        Returns None for chapters too small to judge or whose declared count is
+        known to disagree with the rendered text (front matter — e.g. the
+        版权信息 page declares hundreds of words but renders only a few dozen,
+        reproducibly, in every book).
+        """
+        declared = chapter.get("words") or 0
+        if declared < self.short_chapter_min_words:
+            return None
+        if "版权" in (chapter.get("title") or ""):
+            return None
+        captured = self._count_content_chars(markdown)
+        return captured / declared, captured, declared
 
     async def get_book_title(self):
         meta_data = await self._load_meta_data()
@@ -523,6 +566,64 @@ class WeReadExporter(object):
                 continue
 
             markdown = await self._page.get_markdown()
+
+            # A page turn that silently did not advance yields a chapter with a
+            # correct-looking tail but a short body. Re-fetch it once on a fresh
+            # browser; only report it if it is still short after that.
+            verdict = self._check_chapter_length(chapter, markdown)
+            if verdict is not None:
+                ratio, captured, declared = verdict
+                if ratio < self.short_chapter_ratio:
+                    if chapter["id"] not in self._short_retried:
+                        self._short_retried.add(chapter["id"])
+                        self._short_first_capture[chapter["id"]] = captured
+                        logging.warning(
+                            "[%s] Chapter %s looks incomplete: %d chars captured vs "
+                            "%d declared (%.0f%%); restarting the browser to re-fetch it"
+                            % (
+                                self.__class__.__name__,
+                                chapter["title"],
+                                captured,
+                                declared,
+                                ratio * 100,
+                            )
+                        )
+                        # Nothing written yet, so the retry re-fetches this chapter.
+                        raise utils.LoadChapterFailedError(
+                            "Chapter %s is short: %d/%d chars"
+                            % (chapter["title"], captured, declared)
+                        )
+                    # Still short on the second fetch. Whether that means a real
+                    # gap depends on whether the text moved at all: a re-fetch
+                    # that returns the same length says WeRead's declared count is
+                    # simply higher than what the page renders (seen on healthy
+                    # chapters), while a changed-but-still-short result points at
+                    # a genuine gap. Report either way, tagged with which.
+                    first = self._short_first_capture.get(chapter["id"])
+                    stable = first is not None and abs(captured - first) <= 3
+                    note = (
+                        "unchanged across two fetches — WeRead's declared count is "
+                        "probably just higher than the rendered text"
+                        if stable
+                        else "changed after re-fetching (%s -> %d chars) — likely a "
+                        "real gap" % (first, captured)
+                    )
+                    logging.warning(
+                        "[%s] Chapter %s is still short: %d chars captured vs %d "
+                        "declared (%.0f%%); %s"
+                        % (
+                            self.__class__.__name__,
+                            chapter["title"],
+                            captured,
+                            declared,
+                            ratio * 100,
+                            note,
+                        )
+                    )
+                    self._incomplete_chapters.append(
+                        (index, chapter["title"], captured, declared, ratio, stable)
+                    )
+
             logging.info(
                 "[%s] Export chapter %s to %s"
                 % (self.__class__.__name__, chapter["title"], file_path)

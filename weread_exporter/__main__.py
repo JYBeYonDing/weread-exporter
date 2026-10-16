@@ -163,6 +163,32 @@ async def async_main():
                 % (book_id, len(stalled), ", ".join(str(c) for c in stalled))
             )
 
+        # Same idea for chapters that stayed short of WeRead's declared length
+        # even after a re-fetch: exporting them keeps the book usable, but the
+        # gap must not pass unnoticed. A re-fetch that changed the text points at
+        # a real gap; one that changed nothing usually means the declared count
+        # is simply higher than what the page renders.
+        incomplete = getattr(exporter, "_incomplete_chapters", [])
+        if incomplete:
+            real = [it for it in incomplete if not it[5]]
+            stable = [it for it in incomplete if it[5]]
+            logging.warning(
+                "Book %s: %d chapter(s) are below the declared length even after "
+                "re-fetching (%d likely real gap, %d probably a declared-count "
+                "difference):"
+                % (book_id, len(incomplete), len(real), len(stable))
+            )
+            for index, title, captured, declared, ratio, is_stable in incomplete:
+                logging.warning(
+                    "  chapter %d %s: %d/%d chars (%.0f%%)%s",
+                    index + 1,
+                    title,
+                    captured,
+                    declared,
+                    ratio * 100,
+                    " [unchanged after re-fetch]" if is_stable else " [changed after re-fetch]",
+                )
+
         await exporter.pre_process_markdown()
         title = await exporter.get_book_title()
         title = utils.format_filename(title)
