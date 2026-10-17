@@ -16,7 +16,10 @@ import subprocess
 import sys
 import time
 
-REPO = r"C:\Users\zglzs\workplace\opensource\weread-exporter"
+# Derived from this file, not hardcoded: the clone moves (it already did once,
+# from workplace\opensource to software\) and a stale literal silently drove the
+# old copy. tests/ -> repo root.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOOK = "9c832d005c85699c860113f"        # 失传的营销秘诀, 10 chapters
 KILL_AFTER = 75                          # seconds of healthy running before the kill
 OBSERVE_AFTER_KILL = 150                 # seconds to watch for recovery

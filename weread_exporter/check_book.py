@@ -217,8 +217,28 @@ def log_result(result):
                 logging.warning(line)
 
 
+def _force_utf8_stdio():
+    """Force stdout/stderr to UTF-8 so Chinese conclusions survive Windows pipes.
+
+    Same reason as weread_exporter/__main__._force_utf8_stdio: the console code
+    page is GBK on zh-CN, so `print()` of a Chinese title came out as mojibake
+    whenever this module was run standalone
+    (`python -m weread_exporter.check_book <id>`). The log path used by the
+    exporter is unaffected — it already writes through a UTF-8 FileHandler.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main(argv=None):
     """CLI entry: check one book and print the conclusion."""
+    _force_utf8_stdio()
     ap = argparse.ArgumentParser(prog="weread-exporter.check_book")
     ap.add_argument("book_id")
     ap.add_argument("--hard-ratio", type=float, default=DEFAULT_HARD_RATIO)
