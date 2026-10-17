@@ -218,10 +218,13 @@ class WeReadExporter(object):
 
         if not os.path.isfile(self._meta_path):
             self._meta_data = await self._page.get_book_info()
-            with open(self._meta_path, "w") as fp:
-                fp.write(json.dumps(self._meta_data))
+            # encoding/ensure_ascii are not optional: without them Python uses the
+            # locale codec (GBK here) and escapes Chinese as \uXXXX, so the file
+            # looks garbled in an editor even though json.loads still works.
+            with open(self._meta_path, "w", encoding="utf-8") as fp:
+                fp.write(json.dumps(self._meta_data, ensure_ascii=False, indent=2))
         else:
-            with open(self._meta_path) as fp:
+            with open(self._meta_path, encoding="utf-8") as fp:
                 text = fp.read()
                 if text:
                     self._meta_data = json.loads(text)
