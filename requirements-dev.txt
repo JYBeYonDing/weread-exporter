@@ -1,0 +1,3 @@
+# 审计/验证用，不参与导出。装进 venv 即可：
+#   .venv/Scripts/python.exe -m pip install -r requirements-dev.txt
+PyMuPDF
