@@ -826,29 +826,37 @@ class WeReadExporter(object):
                             # Same page, next loop: goto_chapter re-reads the
                             # chapter, now from its beginning.
                             continue
-                        # Retries exhausted. Report it either way, tagging whether
-                        # the text moved between attempts: a capture that never
-                        # changed usually means WeRead's declared count is simply
-                        # higher than what it renders, while one that changed is a
-                        # genuine gap worth a human look.
+                        # Retries exhausted. First fetch still triggers re-fetches
+                        # when ratio < short_chapter_ratio; only the *verdict*
+                        # after identical retries uses the shortfall floor so a
+                        # short intro (e.g. 182/204) is declared-count drift, not
+                        # an unresolved hole — while 14%/2% truncations stay real
+                        # gaps because their shortfall exceeds the limit.
                         first = self._short_first_capture.get(chapter["id"])
-                        # "Unchanged between fetches" only means WeRead declares
-                        # more than it renders when the capture is *close* to the
-                        # declared count. A capture stuck at a few percent is a
-                        # real gap no matter how reproducibly it repeats.
-                        stable = (
-                            first is not None
-                            and abs(captured - first) <= 3
-                            and ratio >= 0.90
+                        unchanged = (
+                            first is not None and abs(captured - first) <= 3
                         )
-                        note = (
-                            "unchanged across every fetch — WeRead's declared count "
-                            "is probably just higher than the rendered text"
-                            if stable
-                            else "changed between fetches (%s -> %d chars) — likely "
-                            "a real gap" % (first, captured)
-                        )
-                        logging.error(
+                        shortfall = declared - captured
+                        shortfall_ok = shortfall < self._shortfall_limit(declared)
+                        stable = unchanged and shortfall_ok
+                        if stable:
+                            note = (
+                                "unchanged across every fetch — WeRead's declared "
+                                "count is probably just higher than the rendered text"
+                            )
+                        elif unchanged:
+                            note = (
+                                "unchanged but shortfall %d exceeds limit %d — "
+                                "likely a real gap"
+                                % (shortfall, int(self._shortfall_limit(declared)))
+                            )
+                        else:
+                            note = (
+                                "changed between fetches (%s -> %d chars) — likely "
+                                "a real gap" % (first, captured)
+                            )
+                        log_fn = logging.warning if stable else logging.error
+                        log_fn(
                             "[%s] Chapter %s is still short after %d re-fetches: %d "
                             "chars captured vs %d declared (%.0f%%); %s. Keeping the "
                             "longest capture (%d chars)"
