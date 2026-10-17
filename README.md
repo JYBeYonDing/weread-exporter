@@ -67,6 +67,7 @@ python -m venv .venv
 - 运行日志默认写到 `logs/<book_id>.run.log`（UTF-8）；浏览器控制台在 `logs/<book_id>.log`。
 - 每本导完会自动校验 `cache/` 完整性并打印结论；跳过校验加 `--no-check`。
 - 单独复查：`.\.venv\Scripts\python.exe -m weread_exporter.check_book <book_id>`
+- 运行中若 cookie 失效会打 ERROR 并以退出码 `2` 结束（**不会**再等扫码）：启动时用户接口验失败、页脚「登录」、或 canvas 一直不出时探针到登录按钮/用户接口拒绝（不扫正文，避免书中「未登录」误杀）。普通章节抓取失败仍走重试。更新 `cache/cookie.txt` 或加 `--force-login` 后重跑即可续抓。
 
 首次使用若还没有 `.venv`，先跑一次：
 

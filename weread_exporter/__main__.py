@@ -356,6 +356,12 @@ async def async_main():
                     proxy_server=args.proxy_server,
                     use_system_chrome=args.system_chrome,
                 )
+            except utils.CookieExpiredError as ex:
+                logging.error(
+                    "Stopping export: cookie expired or login required (%s)" % ex
+                )
+                await page.close()
+                return 2
             except RuntimeError:
                 logging.exception("Launch book %s home page failed" % book_id)
                 await asyncio.sleep(2)
@@ -363,6 +369,12 @@ async def async_main():
 
             try:
                 await exporter.export_markdown(args.load_timeout, args.load_interval)
+            except utils.CookieExpiredError as ex:
+                logging.error(
+                    "Stopping export: cookie expired or login required (%s)" % ex
+                )
+                await page.close()
+                return 2
             except utils.LoadChapterFailedError:
                 logging.warning(
                     "Load chapter failed (retry %d/%d), close browser and retry"
@@ -584,6 +596,8 @@ async def async_main():
 
 def main():
     ensure_project_venv()
+    from . import utils
+
     _force_utf8_stdio()
     if sys.platform == "win32":
         patch_windows()
@@ -593,13 +607,17 @@ def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(async_main())
-    except:
+        return loop.run_until_complete(async_main())
+    except utils.CookieExpiredError as ex:
+        # Fallback if the error escapes the per-book handlers.
+        logging.error("Stopping export: cookie expired or login required (%s)" % ex)
+        return 2
+    except Exception:
         import traceback
 
         traceback.print_exc()
-        return
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

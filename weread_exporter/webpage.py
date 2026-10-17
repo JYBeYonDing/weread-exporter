@@ -93,6 +93,7 @@ class WeReadWebPage(object):
         return book_info
 
     async def get_user_info(self):
+        """Fetch WeRead profile for wr_vid; raise InvalidUserError when session is dead."""
         vid = self._cookie.get("wr_vid")
         if not vid:
             raise utils.InvalidUserError("Invalid cookie: %s" % self._format_cookie())
@@ -101,6 +102,7 @@ class WeReadWebPage(object):
         rsp = await utils.fetch(url, headers=headers)
         rsp = json.loads(rsp.decode())
         if rsp.get("errCode") == -2012:
+            # Session token stale: pull Set-Cookie from the home page and retry once.
             _, rsp_headers, _ = await utils.fetch(
                 self.__class__.root_url, headers=headers, respond_with_headers=True
             )
@@ -121,10 +123,13 @@ class WeReadWebPage(object):
             headers["Cookie"] = self._format_cookie()
             rsp = await utils.fetch(url, headers=headers)
             rsp = json.loads(rsp.decode())
-        elif rsp.get("errCode") == -2010:
-            # 用户不存在
-            raise utils.InvalidUserError("User %s not found" % vid)
-        elif rsp.get("errCode"):
+        # -2010: user gone. -2012 after refresh: session still rejected.
+        err = rsp.get("errCode")
+        if err in (-2010, -2012):
+            raise utils.InvalidUserError(
+                "User/session rejected (errCode=%s, vid=%s)" % (err, vid)
+            )
+        if err:
             raise RuntimeError("Get user info failed: %s" % rsp)
         return rsp
 
@@ -185,6 +190,83 @@ class WeReadWebPage(object):
 
     async def _update_cookie(self):
         self._cookie = await self._read_cookie()
+
+    async def _probe_cookie_expired(self):
+        """Return a short reason if the session looks dead, else None.
+
+        Canvas never painting is usually a reader/CDP glitch, but a silently
+        expired cookie can look the same when the page has no footer 「登录」
+        button. Only report expiry on positive evidence: dedicated login UI
+        (never full chapter body text — books can contain 「未登录」), or the
+        user API rejecting wr_vid.
+        """
+        try:
+            logged_out = await self._page.evaluate(
+                """() => {
+                  const sels = [
+                    'button.navBar_link_Login',
+                    'div.readerTopBar_right button.actionItem',
+                  ];
+                  for (const sel of sels) {
+                    const el = document.querySelector(sel);
+                    const t = el && (el.innerText || el.textContent || '');
+                    if (t && t.indexOf('登录') >= 0)
+                      return 'login button: ' + t.trim().slice(0, 40);
+                  }
+                  // Scoped login chrome only — skip chapter canvas/body text.
+                  for (const el of document.querySelectorAll(
+                    'button[class*="login"], button[class*="Login"], '
+                    + 'a[class*="login"], a[class*="Login"], .wr_login_btn'
+                  )) {
+                    const t = (el.innerText || el.textContent || '').trim();
+                    if (t && t.indexOf('登录') >= 0 && t.length < 80)
+                      return 'login UI: ' + t.slice(0, 40);
+                  }
+                  return null;
+                }"""
+            )
+            if logged_out:
+                return logged_out
+        except Exception as ex:
+            logging.debug(
+                "[%s] DOM login probe failed: %s" % (self.__class__.__name__, ex)
+            )
+
+        try:
+            if self._page:
+                live = await self._read_cookie()
+                if live:
+                    self._cookie.update(live)
+        except Exception:
+            pass
+        if not self._cookie.get("wr_vid"):
+            return "no wr_vid in cookie"
+        try:
+            await self.get_user_info()
+        except utils.InvalidUserError as ex:
+            return "user API: %s" % ex
+        except Exception as ex:
+            # Transient network / API hiccup — do not kill a healthy session.
+            logging.warning(
+                "[%s] Session probe user API failed (not treating as cookie "
+                "expire): %s" % (self.__class__.__name__, ex)
+            )
+            return None
+        return None
+
+    async def _raise_if_cookie_expired(self, where):
+        """Stop the export when a canvas miss is actually a dead session.
+
+        Logging is left to the caller (__main__) so the stop reason is printed once.
+        """
+        reason = await self._probe_cookie_expired()
+        if not reason:
+            return
+        raise utils.CookieExpiredError(
+            "Cookie expired or login required while %s (%s). "
+            "Refresh cache/cookie.txt or re-run with --force-login."
+            % (where, reason)
+        )
 
     async def check_valid(self):
         html = await utils.fetch(self._home_url)
@@ -400,10 +482,11 @@ class WeReadWebPage(object):
             try:
                 user_info = await self.get_user_info()
             except utils.InvalidUserError as ex:
-                logging.warning(
-                    "[%s] Get user error: %s" % (self.__class__.__name__, ex)
-                )
-                self._cookie = {}
+                raise utils.CookieExpiredError(
+                    "Cookie invalid or expired: %s. "
+                    "Refresh cache/cookie.txt or re-run with --force-login."
+                    % ex
+                ) from ex
             except Exception as ex:
                 logging.warning(
                     "[%s] Get user info failed, continue with cookie: %s"
@@ -560,7 +643,9 @@ class WeReadWebPage(object):
                 self._save_cookie()
                 return True
             else:
-                raise RuntimeError("Login timeout")
+                raise utils.CookieExpiredError(
+                    "Login timeout after 300s; cookie was not refreshed"
+                )
         return False
 
     def _guess_content_type(self, path):
@@ -1035,11 +1120,12 @@ class WeReadWebPage(object):
                     except Exception:
                         pass
                 else:
-                    # Nothing drawn and nothing to harvest. Reloading the page on
-                    # the same browser is far cheaper than a full browser restart
-                    # and clears most one-off reader fetch failures; only when it
-                    # fails too does the exporter escalate to a restart.
+                    # Nothing drawn and nothing to harvest. First rule out a dead
+                    # cookie (no footer 「登录」but session already invalid); then
+                    # soft-reload; probe again if that also fails.
+                    await self._raise_if_cookie_expired("canvas never ready")
                     if not await self._soft_reload_chapter(page_timeout):
+                        await self._raise_if_cookie_expired("after soft reload")
                         raise utils.ChapterContentMissingError(
                             "Chapter content never rendered (reader fetch failed?)"
                         )
@@ -1133,8 +1219,13 @@ class WeReadWebPage(object):
         try:
             await self._check_next_page(page_timeout=page_timeout)
         except utils.LoginRequiredError:
-            await self.login()
-            return await self.goto_chapter(chapter_id, timeout=timeout)
+            # Mid-export: do not wait for a scan. Cookie is gone; stop so the
+            # operator can refresh login instead of spinning for 300s per chapter.
+            raise utils.CookieExpiredError(
+                "Login required at chapter %s (cookie expired or not logged in). "
+                "Refresh cache/cookie.txt or re-run with --force-login."
+                % chapter_id
+            )
 
     async def clear_cache(self):
         await self._page.evaluate("canvasContextHandler.clearCanvasCache();")

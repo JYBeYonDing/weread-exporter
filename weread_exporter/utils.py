@@ -14,6 +14,14 @@ class LoginRequiredError(RuntimeError):
     pass
 
 
+class CookieExpiredError(RuntimeError):
+    """Session cookie is invalid or login is required; export must stop.
+
+    Distinct from LoadChapterFailedError so the browser-restart retry loop does
+    not keep spinning when the account session is dead.
+    """
+
+
 class LoadChapterFailedError(RuntimeError):
     pass
 
