@@ -128,7 +128,30 @@ https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88
 | `--log-file` | `logs/<book-id>.run.log` | UTF-8 运行日志路径 |
 | `--no-check` | 关闭 | 跳过导完后的 cache 完整性校验 |
 
-### PDF 体积
+### 批量导出整个类目
+
+`scripts/batch_category.py` 按类目书单一本一本地导出（**不并发**），每本产出 md + pdf，图片不压缩。
+
+```powershell
+# 类目 1100001（财经）→ Z:\share\books
+.\.venv\Scripts\python.exe scripts\batch_category.py --category 1100001 --output-dir Z:\share\books
+
+# 只看清单、不动文件
+.\.venv\Scripts\python.exe scripts\batch_category.py --list-only
+
+# 先跑 3 本验证
+.\.venv\Scripts\python.exe scripts\batch_category.py --limit 3
+```
+
+- 书单来自 `https://weread.qq.com/web/bookListInCategory/<类目ID>?maxIndex=N`，每页 20 本。接口的 `totalCount` 是该类目下的全部藏书数（财经类 13873），但**列表只开放到有限深度**（实测 1100001 停在约 500 本），脚本以实际能翻到的为准。
+- 书单里的 `bookId` 是数字 ID，导出要用的是 `readerLink` 末尾的编码 ID（如 `95332ad0813ab8705g016ce7`）——脚本自动转换。
+- **可续跑**：成品目录里已有「同名 md 包 + 同名 PDF」的书直接跳过，重跑同一条命令就从上次停下的地方继续。
+- 每本导完打印一行进度（用时、校验结论、预计剩余）；完整记录在 `logs/batch-category-<类目ID>.run.log`，逐本状态在 `cache/batch-category-<类目ID>.json`。
+- cookie 失效时整批停止（退出码 `2`），不会一本一本空转；更新 `cache/cookie.txt` 后重跑即可。
+- 连续 3 本失败会自动停手，避免整批空转（`--max-consecutive-failures`）。
+- 单本总超时默认 4 小时（`--book-timeout`），单本失败默认重试 1 次（`--retries`）。
+
+
 
 默认按原图分辨率嵌入，扫描类/漫画类书籍会产出很大的 PDF（实测一本 197 页漫画约 102 MB）。
 加 `--compress-pdf-images` 会生成一份压缩版：图片另存到 `cache/<book_id>/pdf-images-<长边>-<颜色数>/`，
