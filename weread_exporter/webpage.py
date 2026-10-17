@@ -26,6 +26,11 @@ class WeReadWebPage(object):
     page_turn_timeout = 60
     # Ceiling for tearing a browser down; a wedged CDP link must not block it.
     browser_close_timeout = 30
+    # Hard ceiling for one in-place chapter reload (see _soft_reload_chapter).
+    soft_reload_timeout = 45
+    # Random pause (seconds) before a soft reload, so the retry does not hit the
+    # server at a machine-regular moment right after the failed load.
+    soft_reload_pause = (3, 6)
 
     def __init__(self, book_id, cookie_path=None, webcache_path=None):
         self._book_id = book_id
@@ -45,6 +50,10 @@ class WeReadWebPage(object):
         # Per-chapter page-turn stall count. Lives on this object, not on the
         # page, so it survives the browser restarts the exporter performs.
         self._page_turn_stalls = {}
+        # Per-chapter soft-reload count. Also kept on this object so it survives
+        # browser restarts: a chapter gets one cheap reload, and after a restart
+        # the restart itself is already the escalation, so it is not repeated.
+        self._soft_reloads = {}
         self._chapter_id = None
         # Set when the current chapter had no text layer at all and was salvaged
         # by harvesting its <img> elements instead (see _check_next_page). The
@@ -899,6 +908,54 @@ class WeReadWebPage(object):
             )
         return bool(clicked)
 
+    async def _soft_reload_chapter(self, page_timeout):
+        """Reload the current chapter page once on the same browser.
+
+        Used as the first, cheap answer to "the reader drew nothing": a reload
+        re-runs the reader's content fetch without paying for a browser relaunch
+        (cookie injection, home page, login check). hook.js is registered through
+        CDP for every new document, so the reload gets a fresh hook state.
+
+        Each chapter is allowed one soft reload (the counter outlives browser
+        restarts). Returns True when the canvas finished rendering after the
+        reload, False when the budget is spent, the reload failed, or the reader
+        still drew nothing — the caller then escalates to a browser restart.
+        """
+        chapter = self._chapter_id
+        if self._soft_reloads.get(chapter, 0) >= 1:
+            return False
+        self._soft_reloads[chapter] = self._soft_reloads.get(chapter, 0) + 1
+
+        pause = random.uniform(*self.soft_reload_pause)
+        logging.warning(
+            "[%s] Chapter %s drew nothing; soft reload in %.1fs before "
+            "resorting to a browser restart"
+            % (self.__class__.__name__, chapter, pause)
+        )
+        await asyncio.sleep(pause)
+        try:
+            await asyncio.wait_for(
+                self._page.reload(waitUntil="domcontentloaded"),
+                timeout=self.soft_reload_timeout,
+            )
+        except Exception:
+            logging.warning(
+                "[%s] Soft reload of chapter %s failed; escalating"
+                % (self.__class__.__name__, chapter),
+                exc_info=True,
+            )
+            return False
+
+        ready = await self.wait_for_canvas_complete(
+            timeout=min(40, max(15, page_timeout))
+        )
+        if ready:
+            logging.info(
+                "[%s] Soft reload recovered chapter %s without a browser restart"
+                % (self.__class__.__name__, chapter)
+            )
+        return bool(ready)
+
     async def _advance_to_next_page(self, page_timeout):
         """Click "下一页" and wait for the canvas to re-render the next page."""
         await self._page.evaluate(
@@ -966,9 +1023,14 @@ class WeReadWebPage(object):
                     except Exception:
                         pass
                 else:
-                    raise utils.ChapterContentMissingError(
-                        "Chapter content never rendered (reader fetch failed?)"
-                    )
+                    # Nothing drawn and nothing to harvest. Reloading the page on
+                    # the same browser is far cheaper than a full browser restart
+                    # and clears most one-off reader fetch failures; only when it
+                    # fails too does the exporter escalate to a restart.
+                    if not await self._soft_reload_chapter(page_timeout):
+                        raise utils.ChapterContentMissingError(
+                            "Chapter content never rendered (reader fetch failed?)"
+                        )
 
         # Legacy page-turn UI: poll briefly; missing footer is normal for new UI.
         footer_wait_ms = 3000

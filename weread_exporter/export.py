@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import sys
 import time
@@ -75,6 +76,23 @@ class WeReadExporter(object):
     # position (see WeReadWebPage.reopen_chapter_at_start); the longest capture
     # seen is kept, so a retry can only ever improve on what we already have.
     max_short_retries = 2
+    # Spread of the pause between chapters, as a fraction of the configured mean
+    # interval: the real pause is drawn uniformly from mean*(1-j) .. mean*(1+j).
+    # A fixed pause is both slower than it needs to be and machine-regular; a
+    # random one keeps the same average load while looking less like a script.
+    interval_jitter = 0.4
+
+    @classmethod
+    def _jittered_interval(cls, interval):
+        """Return a randomised pause (seconds) around the mean `interval`.
+
+        With the default mean of 20s and a jitter of 0.4 this is 12..28s.
+        A non-positive interval disables the pause entirely.
+        """
+        if interval <= 0:
+            return 0
+        spread = interval * cls.interval_jitter
+        return random.uniform(interval - spread, interval + spread)
 
     def __init__(self, page, save_dir):
         self._page = page
@@ -607,7 +625,7 @@ class WeReadExporter(object):
         with open(self._cover_image_path, "wb") as fp:
             fp.write(data)
 
-    async def export_markdown(self, timeout=60, interval=30):
+    async def export_markdown(self, timeout=60, interval=20):
         if not os.path.isdir(self._chapter_dir):
             os.makedirs(self._chapter_dir)
         meta_data = await self._load_meta_data()
@@ -908,4 +926,9 @@ class WeReadExporter(object):
             with open(file_path, "wb") as fp:
                 fp.write(markdown.encode("utf-8", errors="replace"))
 
-            await asyncio.sleep(interval)
+            pause = self._jittered_interval(interval)
+            logging.info(
+                "[%s] Sleep %.1fs before the next chapter"
+                % (self.__class__.__name__, pause)
+            )
+            await asyncio.sleep(pause)

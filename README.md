@@ -73,7 +73,7 @@ https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88
 | `-b, --book-id` | 必填 | 书籍 ID（或含 `_` 的书单 ID） |
 | `-o, --output-format` | `epub` | 输出格式，可重复指定 |
 | `--load-timeout` | `60` | 单章页面加载超时（秒） |
-| `--load-interval` | `30` | 每章加载后的间隔（秒），用于降低触发风控的风险 |
+| `--load-interval` | `20` | 章与章之间的平均间隔（秒），实际每次在其 ±40% 内随机（默认 12~28 秒），用于降低触发风控的风险；`0` 表示不等待 |
 | `--css-file` | 无 | 自定义 CSS 文件路径，用于覆盖默认样式 |
 | `--headless` | 关闭 | 以无头模式运行 Chrome |
 | `--force-login` | 关闭 | 强制先执行登录（扫码） |

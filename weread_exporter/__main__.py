@@ -175,9 +175,10 @@ async def async_main():
     )
     parser.add_argument(
         "--load-interval",
-        help="load chapter page interval time",
+        help="mean pause (seconds) between chapters; each pause is randomised "
+        "within +/-40%% of it (default 20 -> 12..28s). 0 disables the pause",
         type=int,
-        default=30,
+        default=20,
     )
     parser.add_argument(
         "--css-file",
