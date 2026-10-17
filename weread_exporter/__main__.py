@@ -12,6 +12,57 @@ DEFAULT_PDF_IMAGE_MAX_SIDE = 1000
 DEFAULT_PDF_IMAGE_COLORS = 256
 
 
+def _project_root():
+    """Return this clone's repository root (parent of the weread_exporter package)."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def ensure_project_venv():
+    """Refuse to run unless the active interpreter is this clone's .venv.
+
+    Each clone must keep its own virtualenv so a global/other-clone install cannot
+    silently take over. Bootstrap with scripts/bootstrap.ps1 (or .sh), then:
+      .venv\\Scripts\\python.exe -m weread_exporter ...
+    """
+    root = _project_root()
+    expected = os.path.abspath(os.path.join(root, ".venv"))
+    prefix = os.path.abspath(sys.prefix)
+    executable = os.path.abspath(sys.executable)
+
+    if sys.platform == "win32":
+        expected_cmp = os.path.normcase(expected)
+        prefix_cmp = os.path.normcase(prefix)
+        executable_cmp = os.path.normcase(executable)
+        sep = "\\"
+        bootstrap = os.path.join(root, "scripts", "bootstrap.ps1")
+        venv_python = os.path.join(expected, "Scripts", "python.exe")
+    else:
+        expected_cmp = expected
+        prefix_cmp = prefix
+        executable_cmp = executable
+        sep = "/"
+        bootstrap = os.path.join(root, "scripts", "bootstrap.sh")
+        venv_python = os.path.join(expected, "bin", "python")
+
+    in_project_venv = (
+        prefix_cmp == expected_cmp
+        or prefix_cmp.startswith(expected_cmp + sep)
+        or executable_cmp.startswith(expected_cmp + sep)
+    )
+    if in_project_venv:
+        return
+
+    raise SystemExit(
+        "Refusing to run outside this clone's .venv.\n"
+        "  active python : %s\n"
+        "  expected venv : %s\n"
+        "Bootstrap once, then use that interpreter:\n"
+        "  %s\n"
+        "  %s -m weread_exporter -b <book-id> ..."
+        % (executable, expected, bootstrap, venv_python)
+    )
+
+
 def patch_windows():
     bin_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "bin", "win32")
     os.environ["PATH"] += ";" + bin_path
@@ -460,6 +511,7 @@ async def async_main():
 
 
 def main():
+    ensure_project_venv()
     if sys.platform == "win32":
         patch_windows()
     patch_generateRequestHash()
