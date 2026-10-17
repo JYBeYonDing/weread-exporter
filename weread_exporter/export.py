@@ -497,12 +497,14 @@ class WeReadExporter(object):
                     % (self.__class__.__name__, name)
                 )
 
-        # meta.json stays in the cache dir (the renderers read it from there) and
-        # is deliberately not part of the delivered bundle. Drop a stale copy an
-        # earlier version may have written here.
-        stale_meta = os.path.join(output_dir, "meta.json")
-        if os.path.isfile(stale_meta):
-            os.remove(stale_meta)
+        # Deliver a meta.json for the md bundle (title/author/chapters), but omit
+        # the remote cover URL — the local cover.jpg beside it is enough.
+        meta_data = await self._load_meta_data()
+        meta_for_bundle = {
+            key: value for key, value in meta_data.items() if key != "cover"
+        }
+        with open(os.path.join(output_dir, "meta.json"), "w", encoding="utf-8") as fp:
+            fp.write(json.dumps(meta_for_bundle, ensure_ascii=False, indent=2))
 
         # Copy cover.jpg if exists
         if os.path.isfile(self._cover_image_path):

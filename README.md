@@ -98,7 +98,7 @@ https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88
 
 | 格式 | 产物 | 说明 |
 | --- | --- | --- |
-| `md` | `output/<书名>/` 目录 | 含 `chapters/`、`images/`、`cover.jpg` |
+| `md` | `output/<书名>/` 目录 | 含 `chapters/`、`images/`、`cover.jpg`、`meta.json`（无 cover URL） |
 | `epub` | `output/<书名>.epub` | 适合手机端访问 |
 | `pdf` | `output/<书名>.pdf` | 适合电脑端访问 |
 | `mobi` | `output/<书名>.mobi` | 适合 Kindle 访问；**仅 Linux 支持**（依赖内置 kindlegen），会同时生成 epub |
