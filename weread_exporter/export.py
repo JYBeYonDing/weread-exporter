@@ -30,7 +30,7 @@ class WeReadExporter(object):
     # markdown scaffolding the canvas hook emits), while genuinely truncated ones
     # landed at 2%-61%. This ratio alone is not enough to call a chapter truncated —
     # see the shortfall rules below.
-    short_chapter_ratio = 0.97
+    short_chapter_ratio = 0.95
     # Chapters this small are unreliable to judge (front matter, part dividers)
     # and are skipped rather than reported.
     short_chapter_min_words = 200

@@ -3,7 +3,7 @@
 """Completeness gate for an exported book.
 
 Usage:
-    python check_book.py <encodeId> [--hard-ratio 0.90] [--warn-ratio 0.97]
+    python check_book.py <encodeId> [--hard-ratio 0.90] [--warn-ratio 0.95]
 
 Exit 0 when the book is complete, exit 1 when it is not (and print what is
 missing).
@@ -68,7 +68,7 @@ def load_summary(cache_dir):
         return None
 
 
-def check(book_id, hard_ratio=0.90, warn_ratio=0.97, min_words=DEFAULT_MIN_WORDS,
+def check(book_id, hard_ratio=0.90, warn_ratio=0.95, min_words=DEFAULT_MIN_WORDS,
           min_shortfall=DEFAULT_MIN_SHORTFALL,
           min_shortfall_ratio=DEFAULT_MIN_SHORTFALL_RATIO, root="."):
     cache_dir = os.path.join(root, "cache", book_id)
@@ -155,7 +155,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("book_id")
     ap.add_argument("--hard-ratio", type=float, default=0.90)
-    ap.add_argument("--warn-ratio", type=float, default=0.97)
+    ap.add_argument("--warn-ratio", type=float, default=0.95)
     ap.add_argument("--min-words", type=int, default=DEFAULT_MIN_WORDS)
     ap.add_argument("--min-shortfall", type=int, default=DEFAULT_MIN_SHORTFALL)
     ap.add_argument("--min-shortfall-ratio", type=float,

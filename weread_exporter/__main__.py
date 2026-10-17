@@ -70,6 +70,54 @@ def patch_windows():
         os.add_dll_directory(bin_path)
 
 
+def _force_utf8_stdio():
+    """Force stdout/stderr to UTF-8 so Chinese log lines survive Windows pipes.
+
+    PowerShell Tee-Object historically decodes child output with the ANSI code
+    page (GBK on zh-CN), which turns UTF-8 chapter titles into mojibake when
+    redirected to a file. Reconfigure the streams (and hint PYTHONIOENCODING)
+    before any logging starts.
+    """
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+def _configure_logging(log_file=None):
+    """Attach console + optional UTF-8 file handlers to the root logger.
+
+    The file handler is the reliable path for Chinese text: it bypasses the
+    shell entirely. Console output still goes to stderr for interactive runs.
+    """
+    logging.root.level = logging.INFO
+    fmt = "[%(asctime)s][%(levelname)s]%(message)s"
+    formatter = logging.Formatter(fmt)
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+               for h in logging.root.handlers):
+        stream_handler = logging.StreamHandler(sys.stderr)
+        stream_handler.setFormatter(formatter)
+        logging.root.addHandler(stream_handler)
+    if not log_file:
+        return
+    abs_path = os.path.abspath(log_file)
+    for handler in logging.root.handlers:
+        if isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", None) == abs_path:
+            return
+    log_dir = os.path.dirname(abs_path)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+    file_handler = logging.FileHandler(abs_path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logging.root.addHandler(file_handler)
+    logging.info("Writing UTF-8 run log to %s" % abs_path)
+
+
 def patch_generateRequestHash():
     from pyppeteer import network_manager
 
@@ -233,10 +281,21 @@ async def async_main():
         type=int,
         default=DEFAULT_PDF_IMAGE_COLORS,
     )
+    parser.add_argument(
+        "--log-file",
+        help="UTF-8 run log path (default: logs/<book-id>.run.log). "
+        "Prefer this over shell Tee on Windows to keep Chinese readable.",
+    )
     args = parser.parse_args()
     args.output_format = args.output_format or ["epub"]
     if "mobi" in args.output_format and "epub" not in args.output_format:
         args.output_format.append("epub")
+
+    log_file = args.log_file
+    if not log_file:
+        safe_id = args.book_id.replace("/", "_").replace("\\", "_")
+        log_file = os.path.join("logs", "%s.run.log" % safe_id)
+    _configure_logging(log_file)
 
     extra_css = None
     if args.css_file:
@@ -513,16 +572,12 @@ async def async_main():
 
 def main():
     ensure_project_venv()
+    _force_utf8_stdio()
     if sys.platform == "win32":
         patch_windows()
     patch_generateRequestHash()
     patch_connection_close()
-    logging.root.level = logging.INFO
-    handler = logging.StreamHandler()
-    fmt = "[%(asctime)s][%(levelname)s]%(message)s"
-    formatter = logging.Formatter(fmt)
-    handler.setFormatter(formatter)
-    logging.root.addHandler(handler)
+    _configure_logging()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
