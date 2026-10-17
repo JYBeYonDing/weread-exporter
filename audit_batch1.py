@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""第一批 12 本的完整性审计：生成逐本明细表。
+"""批次完整性审计：生成逐本明细表。
+
+默认审第一批 12 本；传 --batch 2 审第二批（13~25 共 13 本），--batch all 审全部。
 
 对每本核对：
   - 章节数：缓存里的 .md 数 vs meta.json 声明数
@@ -36,6 +38,23 @@ BATCH = [
     ("10", "7b932060813aba162g018f20", 21, "差异化销售"),
     ("11", "2ab323c07192ea7e2ab1a4a", 31, "成交高于一切：大客户销售十八招（全新修订版3.0）"),
     ("12", "7d032810813ab7817g012000", 45, "大客户销售：谋攻之道（全新版）"),
+]
+
+# 第二批：13~25
+BATCH2 = [
+    ("13", "9c0327605c85e39c067a0a0", 22, "当客户说“不”"),
+    ("14", "c3d3244071e5d40ac3df945", 60, "销售圣经（套装共2册）"),
+    ("15", "a4b32f20813abb0dbg012751", 28, "情绪价值型销售高手"),
+    ("16", "9f532d50813abc119g017d94", 59, "销售洗脑（全能销售系列）"),
+    ("17", "9c832d005c85699c860113f", 10, "失传的营销秘诀"),
+    ("18", "6da323305d18b86da0a7795", 11, "一本书读懂客户心理"),
+    ("19", "d1f321607210fc63d1f7277", 59, "销量公式"),
+    ("20", "e8432e60813ab8b4cg013133", 24, "大客户销售心法"),
+    ("21", "a0832ec0813abbe0dg019bd6", 48, "如何让用户成为你的死忠粉：雷军小米营销法"),
+    ("22", "6ef32fb071c307306ef1a59", 44, "营销心理战：掌握36种购买心理"),
+    ("23", "41b329805df7df41ba680f7", 60, "销售就是要玩转情商"),
+    ("24", "3b632790813ab8f85g0145b7", 38, "华为营销法"),
+    ("25", "bf032c7072103ce5bf0568a", 109, "哈佛经典谈判术：你一开口就赢麻了"),
 ]
 
 # 与 check_book.py / export.py 保持一致
@@ -184,12 +203,21 @@ def audit_one(idx, bid, want_chapters, label):
     return row
 
 
+def pick(which):
+    if which == "2":
+        return BATCH2
+    if which == "all":
+        return BATCH + BATCH2
+    return BATCH
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--markdown")
+    ap.add_argument("--batch", default="1", choices=["1", "2", "all"])
     args = ap.parse_args()
 
-    rows = [audit_one(*b) for b in BATCH]
+    rows = [audit_one(*b) for b in pick(args.batch)]
 
     # 控制台明细
     for r in rows:

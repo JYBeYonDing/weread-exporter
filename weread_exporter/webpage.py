@@ -780,18 +780,23 @@ class WeReadWebPage(object):
         """
         if self._request_interception_ready:
             return
-        hook_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "hook.js"
-        )
-        with open(hook_path, encoding="utf-8") as fp:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(base_dir, "reader_reset.js"), encoding="utf-8") as fp:
+            reset_script = fp.read()
+        with open(os.path.join(base_dir, "hook.js"), encoding="utf-8") as fp:
             hook_script = fp.read()
+        # Order matters: the reset has to own window.__INITIAL_STATE__ before any
+        # page script runs, and hook.js must be in place before the first canvas.
+        await self._page._client.send(
+            "Page.addScriptToEvaluateOnNewDocument", {"source": reset_script}
+        )
         await self._page._client.send(
             "Page.addScriptToEvaluateOnNewDocument", {"source": hook_script}
         )
         self._request_interception_ready = True
         logging.info(
-            "[%s] hook.js injected via CDP (request interception disabled)"
-            % self.__class__.__name__
+            "[%s] hook.js + reader_reset.js injected via CDP "
+            "(request interception disabled)" % self.__class__.__name__
         )
 
     async def wait_for_canvas_complete(self, timeout=30):
