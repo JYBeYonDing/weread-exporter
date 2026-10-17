@@ -48,8 +48,11 @@ python -m venv .venv
 **必须用本仓 `.venv` 里的解释器**（系统 `python` / 全局 `weread-exporter` 会被入口守卫拒绝）。在仓库根目录执行：
 
 ```powershell
-# Windows：导出 markdown + PDF
+# Windows：导出 markdown + PDF（成品默认在 .\output\）
 .\.venv\Scripts\python.exe -m weread_exporter -b <book_id> -o md -o pdf
+
+# 指定成品目录
+.\.venv\Scripts\python.exe -m weread_exporter -b <book_id> -o md -o pdf --output-dir Z:\share\books
 
 # 例
 .\.venv\Scripts\python.exe -m weread_exporter -b 6da323305d18b86da0a7795 -o md -o pdf
@@ -58,12 +61,13 @@ python -m venv .venv
 ```bash
 # macOS / Linux
 .venv/bin/python -m weread_exporter -b <book_id> -o md -o pdf
+.venv/bin/python -m weread_exporter -b <book_id> -o md -o pdf --output-dir /path/to/books
 ```
 
 说明：
 
 - 每种格式单独写一次 `-o`（不要写成 `-o md pdf`）。
-- 章节原文落在 `cache/<book_id>/chapters/`；成品在 `output/`。
+- 章节原文仍在仓库 `cache/<book_id>/chapters/`；成品目录默认 `output/`，可用 `--output-dir` 改（如 `Z:\share\books`）。
 - 运行日志默认写到 `logs/<book_id>.run.log`（UTF-8）；浏览器控制台在 `logs/<book_id>.log`。
 - 每本导完会自动校验 `cache/` 完整性并打印结论；跳过校验加 `--no-check`。
 - 单独复查：`.\.venv\Scripts\python.exe -m weread_exporter.check_book <book_id>`
@@ -100,7 +104,7 @@ https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88
 | `mobi` | `output/<书名>.mobi` | 适合 Kindle 访问；**仅 Linux 支持**（依赖内置 kindlegen），会同时生成 epub |
 | `txt` | `output/<书名>.txt` | 纯文本 |
 
-生成的文件位于当前目录下的 `output/` 目录中。若目标文件已存在，则跳过该格式（不覆盖已有文件）。
+成品默认写在当前目录下的 `output/`，可用 `--output-dir` 指定。若目标文件已存在，则跳过该格式（不覆盖已有文件）。
 
 ### 命令行参数
 
@@ -108,6 +112,7 @@ https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88
 | --- | --- | --- |
 | `-b, --book-id` | 必填 | 书籍 ID（或含 `_` 的书单 ID） |
 | `-o, --output-format` | `epub` | 输出格式，可重复指定 |
+| `--output-dir` | `output` | 成品（md/epub/pdf 等）输出目录 |
 | `--load-timeout` | `60` | 单章页面加载超时（秒） |
 | `--load-interval` | `20` | 章与章之间的平均间隔（秒），实际每次在其 ±40% 内随机（默认 12~28 秒），用于降低触发风控的风险；`0` 表示不等待 |
 | `--css-file` | 无 | 自定义 CSS 文件路径，用于覆盖默认样式 |

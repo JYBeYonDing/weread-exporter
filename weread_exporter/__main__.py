@@ -216,6 +216,11 @@ async def async_main():
         choices=["md", "epub", "pdf", "mobi", "txt"],
     )
     parser.add_argument(
+        "--output-dir",
+        help="directory for finished books (md/epub/pdf/…); default: output",
+        default="output",
+    )
+    parser.add_argument(
         "--load-timeout",
         help="load chapter page timeout",
         type=int,
@@ -327,9 +332,10 @@ async def async_main():
             logging.warning("Book %s status is invalid, stop exporting" % book_id)
             continue
         save_path = os.path.join("cache", book_id)
-        output_dir = "output"
+        output_dir = os.path.abspath(args.output_dir)
         if not os.path.isdir(output_dir):
-            os.mkdir(output_dir)
+            os.makedirs(output_dir)
+        logging.info("Output directory: %s" % output_dir)
         exporter = export.WeReadExporter(page, save_path)
         # Restarts are budgeted per chapter (see WeReadExporter.max_chapter_restarts),
         # so the book-wide allowance only needs to be a backstop against a loop
