@@ -39,8 +39,14 @@ import sys
 # Chapters smaller than this are unreliable to judge (front matter, part
 # dividers) — the same rule the exporter applies.
 DEFAULT_MIN_WORDS = 200
-# Shortfalls smaller than this many characters are never treated as a lost chapter.
-DEFAULT_MIN_SHORTFALL = 500
+# A chapter is only a real gap when it is *both* proportionally short and missing a
+# lot, and the second half scales with the chapter. Over 682 chapters judged
+# complete, the worst shortfall was 2 characters on a 2k chapter but 703 on a 17k
+# one (up to 4.9% of the declared length); every real truncation lost 39%-98%.
+# Keep these in step with WeReadExporter.short_chapter_min_shortfall /
+# short_chapter_shortfall_ratio.
+DEFAULT_MIN_SHORTFALL = 200
+DEFAULT_MIN_SHORTFALL_RATIO = 0.10
 
 
 def strip_count(text):
@@ -63,7 +69,8 @@ def load_summary(cache_dir):
 
 
 def check(book_id, hard_ratio=0.90, warn_ratio=0.97, min_words=DEFAULT_MIN_WORDS,
-          min_shortfall=500, root="."):
+          min_shortfall=DEFAULT_MIN_SHORTFALL,
+          min_shortfall_ratio=DEFAULT_MIN_SHORTFALL_RATIO, root="."):
     cache_dir = os.path.join(root, "cache", book_id)
     meta_path = os.path.join(cache_dir, "meta.json")
     if not os.path.isfile(meta_path):
@@ -92,12 +99,14 @@ def check(book_id, hard_ratio=0.90, warn_ratio=0.97, min_words=DEFAULT_MIN_WORDS
         got = strip_count(text)
         ratio = got / declared
         # A chapter can be a few percent short of the declared count and still be
-        # complete — WeRead declares 459 words for 优势谈判's 内容简介 and renders
-        # 413, reproducibly. What separates that from a real gap is the absolute
-        # shortfall: measured truncations lost 18k-27k characters, benign
-        # differences lose a few dozen. Requiring both a low ratio and a large
-        # absolute gap keeps the gate from failing a whole book over a blurb.
-        if ratio < hard_ratio and (declared - got) >= min_shortfall:
+        # complete — WeRead's declared counts run high on intact chapters, worst
+        # seen 4.9% (100 chars on a 2053-char chapter, 703 on a 17103-char one).
+        # What separates that from a real gap is the size of the shortfall, which
+        # grows with the chapter: real truncations lost 39%-98%, i.e. thousands of
+        # characters. Requiring both a low ratio and a large shortfall keeps the
+        # gate from failing a whole book over a rounding difference.
+        shortfall_limit = max(min_shortfall, declared * min_shortfall_ratio)
+        if ratio < hard_ratio and (declared - got) >= shortfall_limit:
             problems.append(
                 "chapter %d %s: %d/%d chars (%.0f%%)" % (index + 1, ch_title, got, declared, ratio * 100)
             )
@@ -149,12 +158,14 @@ def main():
     ap.add_argument("--warn-ratio", type=float, default=0.97)
     ap.add_argument("--min-words", type=int, default=DEFAULT_MIN_WORDS)
     ap.add_argument("--min-shortfall", type=int, default=DEFAULT_MIN_SHORTFALL)
+    ap.add_argument("--min-shortfall-ratio", type=float,
+                    default=DEFAULT_MIN_SHORTFALL_RATIO)
     ap.add_argument("--root", default=".")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
     r = check(args.book_id, args.hard_ratio, args.warn_ratio, args.min_words,
-              args.min_shortfall, args.root)
+              args.min_shortfall, args.min_shortfall_ratio, args.root)
     if r["state"] == "not-started":
         print("NOT-STARTED %s: %s" % (args.book_id, r["reason"]))
         return 1

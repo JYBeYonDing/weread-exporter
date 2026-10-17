@@ -362,7 +362,12 @@ async def async_main():
                     for (i, t, c, d, _r, _s) in getattr(exporter, "_incomplete_chapters", [])
                 ],
             }
-            with open(os.path.join(save_path_cache, "export_summary.json"), "w") as fp:
+            # encoding is not optional: without it Python uses the locale codec
+            # (GBK on this machine), and check_book.py reads this file back as
+            # UTF-8 — so every summary was silently unreadable and the gate fell
+            # back to a bare ratio scan without saying so.
+            with open(os.path.join(save_path_cache, "export_summary.json"), "w",
+                      encoding="utf-8") as fp:
                 fp.write(json.dumps(summary, ensure_ascii=False, indent=2))
         except Exception:
             logging.exception("Could not write export_summary.json for %s" % book_id)

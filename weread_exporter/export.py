@@ -24,13 +24,39 @@ current_path = os.path.dirname(os.path.abspath(__file__))
 
 class WeReadExporter(object):
     # A chapter whose captured text falls this far below the word count WeRead
-    # declares is treated as incomplete. Calibrated on real exports: the ratio
-    # (whitespace/markup stripped) sits at 1.000-1.013 for months of healthy
-    # chapters, while genuinely truncated ones land at 0.95 and below.
+    # declares is treated as short. Calibrated on real exports: intact chapters sit
+    # at 95%-103% of the declared count (the ratio ignores whitespace and the
+    # markdown scaffolding the canvas hook emits), while genuinely truncated ones
+    # landed at 2%-61%. This ratio alone is not enough to call a chapter truncated —
+    # see the shortfall rules below.
     short_chapter_ratio = 0.97
     # Chapters this small are unreliable to judge (front matter, part dividers)
     # and are skipped rather than reported.
     short_chapter_min_words = 200
+    # A chapter counts as truncated only when it is *both* proportionally short and
+    # missing a substantial amount — the ratio alone cannot tell a real gap from
+    # WeRead's declared counts simply running high, and acting on the ratio alone
+    # made every browser restart's disk rescan re-fetch perfectly good chapters
+    # (31 wasted re-fetches, ~20 minutes, in 《销售就是提问题》 alone).
+    #
+    # The second half cannot be one fixed number, because the drift grows with the
+    # chapter. Measured over 682 chapters judged complete: the worst shortfall was
+    # 2 characters on a 2k chapter but 703 on a 17k one — up to 4.9% of the
+    # declared length. Every real truncation, by contrast, lost 39%-98%. A fixed
+    # 200 flagged 39 of those complete chapters; a fixed 500 still flagged one.
+    # Scaling with the declared length separates the two cleanly, with ~2x margin
+    # above the worst drift and ~4x below the smallest real truncation.
+    short_chapter_min_shortfall = 200       # floor, for short chapters
+    short_chapter_shortfall_ratio = 0.10    # and a proportional part for long ones
+
+    @classmethod
+    def _shortfall_limit(cls, declared):
+        """Shortfall (in characters) below which a chapter is not called truncated."""
+        return max(
+            cls.short_chapter_min_shortfall,
+            declared * cls.short_chapter_shortfall_ratio,
+        )
+
     # Distribution notice WeRead prints on the copyright page. Any line carrying
     # one of these is dropped from every chapter before any format is written,
     # so md/epub/pdf/txt all come out without it.
@@ -615,7 +641,27 @@ class WeReadExporter(object):
                     # otherwise a re-run would keep a truncated chapter forever.
                     existing = open(file_path, encoding="utf-8", errors="ignore").read()
                     verdict = self._check_chapter_length(chapter, existing)
-                    if verdict is None or verdict[0] >= self.short_chapter_ratio:
+                    if verdict is None:
+                        continue
+                    ratio, captured, declared = verdict
+                    if ratio >= self.short_chapter_ratio:
+                        continue
+                    if declared - captured < self._shortfall_limit(declared):
+                        # Near-complete: WeRead declares a few percent more than it
+                        # renders. A re-fetch cannot change that — it returned byte
+                        # identical text every time it was tried — so the file is
+                        # right as it stands. Say so, then leave it alone.
+                        logging.info(
+                            "[%s] Chapter %s holds %.0f%% of its declared length "
+                            "(%d chars short); that is within WeRead's declared-count "
+                            "drift, not a truncation — keeping the file"
+                            % (
+                                self.__class__.__name__,
+                                chapter["title"],
+                                ratio * 100,
+                                declared - captured,
+                            )
+                        )
                         continue
                     # Seed the best-capture floor with what is already on disk, so
                     # a re-fetch that comes back worse cannot destroy text we
@@ -624,14 +670,15 @@ class WeReadExporter(object):
                     if len(existing) > len(self._best_capture.get(chapter["id"], "")):
                         self._best_capture[chapter["id"]] = existing
                     logging.warning(
-                        "[%s] Chapter %s on disk is short (%d chars captured vs %d "
-                        "declared, %.0f%%); re-fetching it"
+                        "[%s] Chapter %s on disk is truncated (%d chars captured vs "
+                        "%d declared, %.0f%%; %d chars missing); re-fetching it"
                         % (
                             self.__class__.__name__,
                             chapter["title"],
-                            verdict[1],
-                            verdict[2],
-                            verdict[0] * 100,
+                            captured,
+                            declared,
+                            ratio * 100,
+                            declared - captured,
                         )
                     )
             logging.info(
