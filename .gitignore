@@ -8,3 +8,4 @@ output/
 *.md
 *.log
 *.egg-info/
+.venv/

@@ -1,7 +1,22 @@
-aiohttp
-beautifulsoup4
-ebooklib
-markdown
-Pillow; sys_platform == 'win32'
-pyppeteer
+# Pinned deliberately — do NOT loosen these into ranges. The whole point of this
+# file is that a fresh environment reproduces a working one; the failure it
+# guards against is websockets drifting upward until pyppeteer's teardown path
+# wedges the export (see patch_connection_close in weread_exporter/__main__.py).
+#
+# pyppeteer 2.0.0 is the last release of an unmaintained library and declares:
+#   websockets >=10.0,<11.0   pyee >=11.0.0,<12.0.0   urllib3 >=1.25.8,<2.0.0
+# None of those three may move. websockets in particular is only ever a
+# transitive dependency here, which is exactly how it got upgraded to 16.1.1 in
+# the shared global environment and broke things.
+websockets>=10.0,<11.0
+pyee>=11.0,<12.0
+urllib3>=1.25.8,<2.0.0
+pyppeteer==2.0.0
+
+# The rest are pinned to the versions this project was verified against.
+aiohttp==3.13.3
+beautifulsoup4==4.14.3
+ebooklib==0.20
+markdown==3.10
+Pillow==12.2.0; sys_platform == 'win32'
 weasyprint==52.5

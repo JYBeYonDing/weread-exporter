@@ -12,8 +12,22 @@ LOG_DIR="$REPO/logs"
 STATUS="$LOG_DIR/STATUS.tsv"
 LOCK="$LOG_DIR/export_remaining.lock"
 ATTENTION="$LOG_DIR/NEEDS_ATTENTION.txt"
+SKIP_LIST="$LOG_DIR/skip_books.txt"
 cd "$REPO" || exit 1
 mkdir -p "$LOG_DIR"
+
+# The one switch point for the Python environment. Everything below runs through
+# this interpreter, so moving between the shared global install and the project
+# venv is a single edit — and rolling back is the same edit in reverse.
+# The venv exists because pyppeteer 2.0.0 needs websockets <11 while the global
+# environment carries 16.1.1 for codex/yfinance; those two cannot coexist.
+PY="$REPO/.venv/Scripts/python.exe"
+if [ ! -x "$PY" ]; then
+  echo "FATAL: venv python not found at $PY" | tee -a "$LOG_DIR/STATUS.tsv"
+  echo "       recreate it with: python -m venv .venv && .venv/Scripts/python.exe -m pip install -r requirements.txt" | tee -a "$LOG_DIR/STATUS.tsv"
+  exit 1
+fi
+PYTHONIOENCODING=utf-8 "$PY" -c "import sys, websockets; print('python', sys.version.split()[0], '| websockets', websockets.__version__)"   >> "$LOG_DIR/STATUS.tsv" 2>&1
 
 # 单实例锁：已在跑就直接退出，绝不并发
 if [ -e "$LOCK" ]; then
@@ -61,6 +75,13 @@ for entry in "${BOOKS[@]}"; do
   IFS='|' read -r idx bid want title <<< "$entry"
   log="$LOG_DIR/book${idx}.log"
   marker="$LOG_DIR/.marker_b${idx}"
+  # 已登记为"救不回来"的书不再重跑：它的缺口在 NEEDS_ATTENTION.txt 里，
+  # 重跑只会消耗三四十分钟再得到同一个结论。
+  if [ -f "$SKIP_LIST" ] && grep -qE "^[[:space:]]*${idx}[[:space:]]*(#|$)" "$SKIP_LIST"; then
+    say "=== BOOK ${idx} SKIPPED $(date '+%F %T') | ${title} | 已登记为已知缺口，见 NEEDS_ATTENTION.txt ==="
+    continue
+  fi
+
   say "=== BOOK ${idx} START $(date '+%F %T') | ${title} | ${bid} | expect ${want} ch ==="
 
   attempt=0; ok=0; why=""
@@ -72,15 +93,28 @@ for entry in "${BOOKS[@]}"; do
     # the exporter skips an existing PDF — so drop it and let it be rebuilt from
     # the chapters we now have.
     find output -maxdepth 1 -name "${title}*.pdf" -delete 2>/dev/null
-    PYTHONIOENCODING=utf-8 python -u -m weread_exporter -b "$bid" -o md -o pdf >> "$log" 2>&1
+    # Hard cap per attempt. A wedged CDP link can leave the exporter hanging on an
+    # asyncio loop that never advances — 《赢单九问》 sat at 9/15 chapters for 4.5 h
+    # with no timeout of its own to break out. Budget generously off the chapter
+    # count (30 s pacing per chapter plus fetch time) so a healthy long book is
+    # never cut off; the cache makes a killed attempt resumable.
+    cap=$(( want * 90 + 1800 ))
+    [ "$cap" -lt 3600 ] && cap=3600
+    timeout -k 30 "$cap" env PYTHONIOENCODING=utf-8 "$PY" -u -m weread_exporter -b "$bid" -o md -o pdf >> "$log" 2>&1
     rc=$?
+    if [ "$rc" -eq 124 ]; then
+      echo "--- attempt ${attempt} hit the ${cap}s cap and was killed $(date '+%F %T') ---" >> "$log"
+      say "!!! BOOK ${idx} attempt ${attempt}: 超过 ${cap}s 上限被强杀（会续跑）"
+    fi
+    # A killed run can leave its Chromium behind; never let orphans pile up.
+    PYTHONIOENCODING=utf-8 "$PY" kill_stale_chromium.py >> "$log" 2>&1
     got=$(ls cache/"$bid"/chapters/*.md 2>/dev/null | wc -l)
     newpdf=$(find output -maxdepth 1 -name '*.pdf' -newer "$marker" 2>/dev/null | head -1)
     rm -f "$marker"
 
     if [ -n "$newpdf" ] && [ "$got" -ge "$want" ]; then
       # 完整性门槛：不只数文件，逐章核对正文是否到位
-      if PYTHONIOENCODING=utf-8 python check_book.py "$bid" >> "$log" 2>&1; then
+      if PYTHONIOENCODING=utf-8 "$PY" check_book.py "$bid" >> "$log" 2>&1; then
         ok=1; break
       fi
       why="completeness gate failed"
@@ -99,7 +133,7 @@ for entry in "${BOOKS[@]}"; do
     {
       echo "=== BOOK ${idx} | ${title} | ${bid} | $(date '+%F %T')"
       echo "    原因: ${why}"
-      PYTHONIOENCODING=utf-8 python check_book.py "$bid" 2>&1 | sed 's/^/    /'
+      PYTHONIOENCODING=utf-8 "$PY" check_book.py "$bid" 2>&1 | sed 's/^/    /'
       echo
     } >> "$ATTENTION"
   fi

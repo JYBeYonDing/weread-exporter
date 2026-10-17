@@ -32,6 +32,7 @@ def ps(script):
 
 def main():
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    started_at = time.strftime("%Y-%m-%d %H:%M:%S")
     log = open(LOG, "wb")
     proc = subprocess.Popen(
         [sys.executable, "-u", "-m", "weread_exporter", "-b", BOOK, "-o", "md", "-o", "pdf"],
@@ -44,13 +45,18 @@ def main():
         print("export already exited (rc=%s) — cannot run the kill test" % proc.returncode)
         return 1
 
+    # Identify the exporter's Chromium by image path plus creation time rather
+    # than by parent pid: pyppeteer can restart the browser during the settle
+    # window, and the live one is not always a direct child at that instant.
     kids = ps("Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
-              "Where-Object { $_.ParentProcessId -eq %d } | "
-              "Select-Object ProcessId | ConvertTo-Json -Compress" % proc.pid)
+              "Where-Object { $_.ExecutablePath -like '*pyppeteer*local-chromium*' -and "
+              "$_.CreationDate -ge (Get-Date '%%START%%') } | "
+              "Select-Object ProcessId | ConvertTo-Json -Compress"
+              .replace("%%START%%", started_at))
     pids = [k["ProcessId"] for k in kids] if isinstance(kids, list) else (
         [kids["ProcessId"]] if kids else [])
     if not pids:
-        print("no chromium child of pid %d — cannot run the kill test" % proc.pid)
+        print("no exporter chromium found (started after %s) — cannot run the kill test" % started_at)
         proc.kill()
         return 1
 

@@ -13,11 +13,26 @@
 
 ## 安装
 
+**必须装进虚拟环境，不要装进全局环境。** 这不是洁癖，是硬需求：
+
+pyppeteer 2.0.0 是该库最后一个版本，它声明依赖 `websockets >=10.0,<11.0`。
+而同一台机器上的其他项目要求相反方向——`codex-app-server-sdk` 要 `websockets>=16`，
+`yfinance` 要 `>=13`。这两组约束在同一个 site-packages 里**无法共存**。实际发生过
+的就是：全局环境里 websockets 被顶到 16.1.1，pyppeteer 的 CDP 拆除路径因此抛
+`InvalidStateError` 并让导出永久卡死（详见 `weread_exporter/__main__.py` 的
+`patch_connection_close`）。`requirements.txt` 已把这类包显式钉住——**不要放开成范围**。
+
 ```bash
-$ pip3 install -e .
+$ python -m venv .venv
+$ .venv/Scripts/python.exe -m pip install -r requirements.txt   # Windows
+$ .venv/Scripts/python.exe -m pip install -e .
+$ .venv/bin/python -m pip install -r requirements.txt           # macOS / Linux
+$ .venv/bin/python -m pip install -e .
 ```
 
-> 需要 Python 3.7+。PDF 导出依赖 WeasyPrint；Windows 下所需的 GTK 动态库已随包附带（`weread_exporter/bin/win32/`）。
+> 需要 Python 3.7+（实测 3.12.10）。PDF 导出依赖 WeasyPrint；Windows 下所需的 GTK 动态库已随包附带（`weread_exporter/bin/win32/`）。
+>
+> 提醒：Windows 的 venv 里 `.venv/Scripts/python.exe` 是个启动器，它会再拉起一个基解释器子进程——**任务管理器里看到两个 python 是正常的**，不是并发。
 
 ## 使用
 

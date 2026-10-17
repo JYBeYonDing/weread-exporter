@@ -8,9 +8,15 @@ with open("README.md", "rb") as fp:
     README = fp.read().decode()
 
 
-with open("requirements.txt") as fp:
-    text = fp.read()
-    REQUIREMENTS = text.split("\n")
+with open("requirements.txt", encoding="utf-8") as fp:
+    # Drop comments and blank lines: requirements.txt carries the reasoning for
+    # each pin, and a bare split("\n") would hand setuptools those comment lines
+    # (and the trailing empty string) as if they were requirements.
+    REQUIREMENTS = [
+        line.strip()
+        for line in fp
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
 
 
 def find_packages():
