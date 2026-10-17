@@ -487,6 +487,13 @@ class WeReadWebPage(object):
                 )
             raise ex
 
+    def _browser_console_log_path(self):
+        """Return the path for this book's browser console log under logs/."""
+        log_dir = "logs"
+        if not os.path.isdir(log_dir):
+            os.makedirs(log_dir)
+        return os.path.join(log_dir, "%s.log" % self._book_id)
+
     def handle_log(self, message):
         # 只落盘 warning/error，避免 hook.js 的 canvas 调试日志（每页数千条
         # fillRect/fillStyle）在事件循环里同步刷盘，把 CDP 消息处理饿死导致
@@ -494,7 +501,7 @@ class WeReadWebPage(object):
         # 一个章节就能写 18MB 日志。
         if message.type not in ("warning", "error"):
             return
-        with open("%s.log" % self._book_id, "a+", encoding="utf-8") as fp:
+        with open(self._browser_console_log_path(), "a+", encoding="utf-8") as fp:
             fp.write("[%s] %s\n" % (self._url, message.text))
 
     async def wait_for_avatar(self, timeout=30):
