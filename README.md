@@ -22,13 +22,22 @@ pyppeteer 2.0.0 是该库最后一个版本，它声明依赖 `websockets >=10.0
 `InvalidStateError` 并让导出永久卡死（详见 `weread_exporter/__main__.py` 的
 `patch_connection_close`）。`requirements.txt` 已把这类包显式钉住——**不要放开成范围**。
 
-```bash
-$ python -m venv .venv
-$ .venv/Scripts/python.exe -m pip install -r requirements.txt   # Windows
-$ .venv/Scripts/python.exe -m pip install -e .
-$ .venv/bin/python -m pip install -r requirements.txt           # macOS / Linux
-$ .venv/bin/python -m pip install -e .
+```powershell
+# Windows（推荐）
+.\scripts\bootstrap.ps1
+
+# 或手动
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
+
+```bash
+# macOS / Linux
+./scripts/bootstrap.sh
+# 或：python -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
+```
+
+在仓库根目录用 `.venv` 跑 `-m weread_exporter` 即可（不必 `pip install -e .`）。
 
 > 需要 Python 3.7+（实测 3.12.10）。PDF 导出依赖 WeasyPrint；Windows 下所需的 GTK 动态库已随包附带（`weread_exporter/bin/win32/`）。
 >
@@ -36,8 +45,34 @@ $ .venv/bin/python -m pip install -e .
 
 ## 使用
 
+**必须用本仓 `.venv` 里的解释器**（系统 `python` / 全局 `weread-exporter` 会被入口守卫拒绝）。在仓库根目录执行：
+
+```powershell
+# Windows：导出 markdown + PDF
+.\.venv\Scripts\python.exe -m weread_exporter -b <book_id> -o md -o pdf
+
+# 例
+.\.venv\Scripts\python.exe -m weread_exporter -b 6da323305d18b86da0a7795 -o md -o pdf
+```
+
 ```bash
-$ python -m weread_exporter -b <book_id> [-o <format> ...]
+# macOS / Linux
+.venv/bin/python -m weread_exporter -b <book_id> -o md -o pdf
+```
+
+说明：
+
+- 每种格式单独写一次 `-o`（不要写成 `-o md pdf`）。
+- 章节原文落在 `cache/<book_id>/chapters/`；成品在 `output/`。
+- 运行日志默认写到 `logs/<book_id>.run.log`（UTF-8）；浏览器控制台在 `logs/<book_id>.log`。
+- 每本导完会自动校验 `cache/` 完整性并打印结论；跳过校验加 `--no-check`。
+- 单独复查：`.\.venv\Scripts\python.exe -m weread_exporter.check_book <book_id>`
+
+首次使用若还没有 `.venv`，先跑一次：
+
+```powershell
+.\scripts\bootstrap.ps1          # Windows
+# ./scripts/bootstrap.sh         # macOS / Linux
 ```
 
 ### 获取书籍 ID
@@ -84,6 +119,8 @@ https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88
 | `--compress-pdf-images` | 关闭 | 压缩 PDF 内嵌图片（降采样 + 调色板），另存为 `<书名>-compressed.pdf`，不覆盖原图与高清 PDF |
 | `--pdf-image-max-side` | `1000` | 配合上一个参数：图片长边上限（像素，0 表示不缩放） |
 | `--pdf-image-colors` | `256` | 配合上一个参数：调色板颜色数（0 表示保留真彩） |
+| `--log-file` | `logs/<book-id>.run.log` | UTF-8 运行日志路径 |
+| `--no-check` | 关闭 | 跳过导完后的 cache 完整性校验 |
 
 ### PDF 体积
 
