@@ -286,6 +286,12 @@ async def async_main():
         help="UTF-8 run log path (default: logs/<book-id>.run.log). "
         "Prefer this over shell Tee on Windows to keep Chinese readable.",
     )
+    parser.add_argument(
+        "--no-check",
+        help="skip post-export completeness check (default: check each book)",
+        action="store_true",
+        default=False,
+    )
     args = parser.parse_args()
     args.output_format = args.output_format or ["epub"]
     if "mobi" in args.output_format and "epub" not in args.output_format:
@@ -474,7 +480,7 @@ async def async_main():
                 ],
             }
             # encoding is not optional: without it Python uses the locale codec
-            # (GBK on this machine), and check_book.py reads this file back as
+            # (GBK on this machine), and check_book reads this file back as
             # UTF-8 — so every summary was silently unreadable and the gate fell
             # back to a bare ratio scan without saying so.
             with open(os.path.join(save_path_cache, "export_summary.json"), "w",
@@ -567,6 +573,12 @@ async def async_main():
             else:
                 await exporter.markdown_to_txt(save_path)
                 logging.info("Save file %s complete" % save_path)
+
+        if not args.no_check:
+            from . import check_book
+
+            # Judge cache/<id>/chapters + export_summary only (not output/).
+            check_book.log_result(check_book.check(book_id))
     return 0
 
 
