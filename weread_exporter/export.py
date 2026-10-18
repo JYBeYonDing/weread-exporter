@@ -129,10 +129,14 @@ class WeReadExporter(object):
 
         Returns True once the chapter has used up its allowance and should be
         skipped instead of retried; the caller then writes a placeholder so the
-        book keeps going.
+        book keeps going. Already-exhausted chapters are not incremented again
+        (avoids "failed 34 times" after a dead session walks the rest of the book).
         """
         chapter_id = chapter["id"]
-        used = self._chapter_restarts.get(chapter_id, 0) + 1
+        used = self._chapter_restarts.get(chapter_id, 0)
+        if used >= self.max_chapter_restarts:
+            return True
+        used += 1
         self._chapter_restarts[chapter_id] = used
         if used >= self.max_chapter_restarts:
             logging.error(
@@ -152,6 +156,21 @@ class WeReadExporter(object):
                 reason,
             )
         )
+        return False
+
+    @staticmethod
+    def _is_cdp_session_dead(ex, err_msg):
+        """True when the browser/CDP link is gone (not a single-chapter wedged page)."""
+        if "Session closed" in err_msg or "Target closed" in err_msg:
+            return True
+        if "Protocol error" in err_msg and "closed" in err_msg.lower():
+            return True
+        if (
+            _pyppeteer_errors
+            and isinstance(ex, _pyppeteer_errors.NetworkError)
+            and ("Session closed" in err_msg or "Target closed" in err_msg)
+        ):
+            return True
         return False
 
     async def get_chapter_count(self):
@@ -737,37 +756,31 @@ class WeReadExporter(object):
                     raise ex
                 except Exception as ex:
                     err_msg = str(ex)
-                    # Detect a dead browser session — no point retrying with the
-                    # same dead browser. A stalled page turn and a chapter the
-                    # reader never drew belong here too: both leave the session
-                    # wedged, so retrying on it would fail the same way. The
-                    # browser is restarted and the chapter retried; a second
-                    # stall then falls back.
-                    is_browser_dead = isinstance(
+                    # CDP Session/Target closed means the *whole* browser is gone.
+                    # Never write placeholders for the remaining chapters on a dead
+                    # session (that produced the "failed 34/43 times" cascade); ask
+                    # __main__ to relaunch Chrome and resume.
+                    if self._is_cdp_session_dead(ex, err_msg):
+                        logging.warning(
+                            "[%s] Browser session dead on chapter %s (%s); "
+                            "restarting browser instead of skipping ahead"
+                            % (self.__class__.__name__, chapter["title"], err_msg)
+                        )
+                        raise utils.LoadChapterFailedError(
+                            "Browser session dead on chapter %s: %s"
+                            % (chapter["title"], err_msg)
+                        )
+                    # Page-turn stall / content never rendered: the page is wedged
+                    # but a fresh browser may recover. Budget restarts per chapter;
+                    # only then write a placeholder and continue with a live session.
+                    is_chapter_wedged = isinstance(
                         ex,
                         (
                             utils.PageTurnStalledError,
                             utils.ChapterContentMissingError,
                         ),
-                    ) or (
-                        _pyppeteer_errors
-                        and isinstance(ex, _pyppeteer_errors.NetworkError)
-                        and ("Session closed" in err_msg or "Target closed" in err_msg)
                     )
-                    # A dropped CDP link surfaces as a plain "Protocol error ...
-                    # Target closed." once pyppeteer's teardown settles the
-                    # pending callbacks (see patch_connection_close). Match on the
-                    # text too, otherwise that case would burn the ordinary
-                    # three in-process attempts on a browser that is already gone.
-                    if not is_browser_dead and (
-                        "Target closed" in err_msg or "Protocol error" in err_msg
-                    ):
-                        is_browser_dead = True
-                    if is_browser_dead:
-                        # Budget the restart against this chapter alone, so one
-                        # chapter's trouble cannot abort a book that is otherwise
-                        # complete. Skipping (chapter_done stays False) drops
-                        # through to the placeholder path below.
+                    if is_chapter_wedged:
                         if self._spend_chapter_restart(chapter, err_msg):
                             break
                         raise utils.LoadChapterFailedError(
