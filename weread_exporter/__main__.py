@@ -201,6 +201,112 @@ def patch_connection_close():
     pyppeteer_connection.Connection._on_close = safe_on_close
 
 
+def _scan_formats(book_dir, title):
+    """Map each deliverable present in the book folder to its relative path.
+
+    export_summary.json is the single place that says what was exported, so this
+    reflects the files actually on disk rather than what this run asked for
+    (an earlier run may already have produced other formats).
+    """
+    candidates = [
+        ("md", "markdown"),
+        ("pdf", "%s.pdf" % title),
+        ("pdf-compressed", "%s%s.pdf" % (title, COMPRESS_PDF_SUFFIX)),
+        ("epub", "%s.epub" % title),
+        ("mobi", "%s.mobi" % title),
+        ("txt", "%s.txt" % title),
+    ]
+    found = {}
+    for name, rel in candidates:
+        full = os.path.join(book_dir, rel)
+        if os.path.isdir(full) or os.path.isfile(full):
+            found[name] = rel
+    return found
+
+
+def _save_export_summary(summary, *dirs):
+    """Write export_summary.json (UTF-8) into every directory given.
+
+    encoding is not optional: without it Python uses the locale codec (GBK on
+    this machine) and the summary is unreadable when read back as UTF-8.
+    """
+    text = json.dumps(summary, ensure_ascii=False, indent=2)
+    for directory in dirs:
+        with open(os.path.join(directory, "export_summary.json"), "w", encoding="utf-8") as fp:
+            fp.write(text)
+
+
+def _requested_format_keys(args):
+    """export_summary `formats` keys that this command line asks for."""
+    keys = []
+    for name in args.output_format:
+        if name == "pdf" and args.compress_pdf_images:
+            name = "pdf-compressed"
+        keys.append(name)
+    return keys
+
+
+def find_book_summary(output_dir, book_id, utils):
+    """Locate this book's folder + export_summary.json under the output dir.
+
+    Tries the title recorded in cache/<id>/meta.json first (cheap), then scans
+    the output dir for a summary carrying the same book_id. Returns
+    (summary_dict, book_dir) or (None, None).
+    """
+    def load(book_dir):
+        path = os.path.join(book_dir, "export_summary.json")
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, encoding="utf-8") as fp:
+                data = json.load(fp)
+        except Exception:
+            return None
+        return data if data.get("book_id") == book_id else None
+
+    meta_path = os.path.join("cache", book_id, "meta.json")
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path, encoding="utf-8") as fp:
+                title = utils.format_filename(json.load(fp)["title"])
+            book_dir = os.path.join(output_dir, title)
+            data = load(book_dir)
+            if data is not None:
+                return data, book_dir
+        except Exception:
+            pass
+    try:
+        names = os.listdir(output_dir)
+    except OSError:
+        return None, None
+    for name in names:
+        book_dir = os.path.join(output_dir, name)
+        if os.path.isdir(book_dir):
+            data = load(book_dir)
+            if data is not None:
+                return data, book_dir
+    return None, None
+
+
+def plan_book(summary, wanted):
+    """Decide what to do for a book from its export_summary.json alone.
+
+    Returns (plan, reason):
+      "download" - no summary / not complete: run the full download
+      "formats"  - complete, but some requested formats are missing
+      "skip"     - complete and every requested format already exists
+    """
+    if summary is None:
+        return "download", "no export_summary.json in the output folder"
+    if not summary.get("complete"):
+        return "download", "export_summary says status=%s (not complete)" % summary.get("status")
+    have = summary.get("formats") or {}
+    missing = [name for name in wanted if name not in have]
+    if not missing:
+        return "skip", "complete, formats %s all present" % ", ".join(wanted)
+    return "formats", "complete, missing formats: %s" % ", ".join(missing)
+
+
 async def async_main():
     from . import export, utils, webpage
 
@@ -292,6 +398,12 @@ async def async_main():
         "Prefer this over shell Tee on Windows to keep Chinese readable.",
     )
     parser.add_argument(
+        "--force",
+        help="ignore export_summary.json and run the full download again",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
         "--no-check",
         help="skip post-export completeness check (default: check each book)",
         action="store_true",
@@ -328,157 +440,186 @@ async def async_main():
             cookie_path=os.path.join("cache", "cookie.txt"),
             webcache_path="cache",
         )
-        if not await page.check_valid():
-            logging.warning("Book %s status is invalid, stop exporting" % book_id)
-            continue
         save_path = os.path.join("cache", book_id)
         output_dir = os.path.abspath(args.output_dir)
         if not os.path.isdir(output_dir):
             os.makedirs(output_dir)
         logging.info("Output directory: %s" % output_dir)
-        exporter = export.WeReadExporter(page, save_path)
-        # Restarts are budgeted per chapter (see WeReadExporter.max_chapter_restarts),
-        # so the book-wide allowance only needs to be a backstop against a loop
-        # that never converges — sized off the real chapter count rather than the
-        # flat 10 that used to abort a book whose chapters had each been restarted
-        # once for unrelated reasons.
-        try:
-            chapter_total = await exporter.get_chapter_count()
-        except Exception:
-            logging.exception("Cannot read chapter count for book %s" % book_id)
-            chapter_total = 10
-        max_retries = chapter_total * max(2, export.WeReadExporter.max_chapter_restarts) + 5
-        logging.info(
-            "Book %s has %d chapters; restart budget for this book is %d"
-            % (book_id, chapter_total, max_retries)
-        )
-        for retry_count in range(max_retries):
-            try:
-                await page.launch(
-                    headless=args.headless,
-                    force_login=args.force_login,
-                    use_default_profile=args.use_default_profile,
-                    mock_user_agent=args.mock_user_agent,
-                    proxy_server=args.proxy_server,
-                    use_system_chrome=args.system_chrome,
-                )
-            except utils.CookieExpiredError as ex:
-                logging.error(
-                    "Stopping export: cookie expired or login required (%s)" % ex
-                )
-                await page.close()
-                return 2
-            except RuntimeError:
-                logging.exception("Launch book %s home page failed" % book_id)
-                await asyncio.sleep(2)
-                continue
 
-            try:
-                await exporter.export_markdown(args.load_timeout, args.load_interval)
-            except utils.CookieExpiredError as ex:
-                logging.error(
-                    "Stopping export: cookie expired or login required (%s)" % ex
-                )
-                await page.close()
-                return 2
-            except utils.LoadChapterFailedError:
-                logging.warning(
-                    "Load chapter failed (retry %d/%d), close browser and retry"
-                    % (retry_count + 1, max_retries)
-                )
-                await page.close()
-            else:
-                await page.close()
-                break
+        # Decide from <output-dir>/<title>/export_summary.json alone whether this
+        # book needs a download, only missing formats, or nothing at all.
+        existing, _existing_dir = find_book_summary(output_dir, book_id, utils)
+        wanted_formats = _requested_format_keys(args)
+        if args.force:
+            plan, plan_reason = "download", "--force"
         else:
-            logging.error(
-                "Book %s export failed after %d retries, giving up" % (book_id, max_retries)
-            )
-            await page.close()
+            plan, plan_reason = plan_book(existing, wanted_formats)
+        if plan == "formats":
+            # Formats are built from cache/, so the chapters must still be there.
+            from . import check_book
+
+            cache_verdict = check_book.check(book_id, summary=existing)
+            if cache_verdict.get("state") != "OK":
+                plan, plan_reason = "download", "cache/ chapters are not intact"
+        logging.info("Book %s plan: %s (%s)" % (book_id, plan, plan_reason))
+        if plan == "skip":
+            logging.info("Book %s already exported completely, nothing to do" % book_id)
             continue
 
-        # Surface chapters that only got captured because a page turn stalled
-        # twice (browser restart did not clear it). They are kept so the book
-        # still exports, but they may be short — say so loudly rather than
-        # handing over a silently incomplete book.
-        stalled = sorted(
-            cid for cid, n in getattr(page, "_page_turn_stalls", {}).items() if n > 1
-        )
-        if stalled:
-            logging.warning(
-                "Book %s: page turn stalled twice in %d chapter(s), kept as captured "
-                "and they may be INCOMPLETE: %s"
-                % (book_id, len(stalled), ", ".join(str(c) for c in stalled))
+        exporter = export.WeReadExporter(page, save_path)
+        if plan == "download":
+            if not await page.check_valid():
+                logging.warning("Book %s status is invalid, stop exporting" % book_id)
+                continue
+            # Restarts are budgeted per chapter (see WeReadExporter.max_chapter_restarts),
+            # so the book-wide allowance only needs to be a backstop against a loop
+            # that never converges — sized off the real chapter count rather than the
+            # flat 10 that used to abort a book whose chapters had each been restarted
+            # once for unrelated reasons.
+            try:
+                chapter_total = await exporter.get_chapter_count()
+            except Exception:
+                logging.exception("Cannot read chapter count for book %s" % book_id)
+                chapter_total = 10
+            max_retries = chapter_total * max(2, export.WeReadExporter.max_chapter_restarts) + 5
+            logging.info(
+                "Book %s has %d chapters; restart budget for this book is %d"
+                % (book_id, chapter_total, max_retries)
             )
+            for retry_count in range(max_retries):
+                try:
+                    await page.launch(
+                        headless=args.headless,
+                        force_login=args.force_login,
+                        use_default_profile=args.use_default_profile,
+                        mock_user_agent=args.mock_user_agent,
+                        proxy_server=args.proxy_server,
+                        use_system_chrome=args.system_chrome,
+                    )
+                except utils.CookieExpiredError as ex:
+                    logging.error(
+                        "Stopping export: cookie expired or login required (%s)" % ex
+                    )
+                    await page.close()
+                    return 2
+                except RuntimeError:
+                    logging.exception("Launch book %s home page failed" % book_id)
+                    await asyncio.sleep(2)
+                    continue
 
-        # Same idea for chapters that stayed short of WeRead's declared length
-        # even after a re-fetch: exporting them keeps the book usable, but the
-        # gap must not pass unnoticed. A re-fetch that changed the text points at
-        # a real gap; one that changed nothing usually means the declared count
-        # is simply higher than what the page renders.
-        incomplete = getattr(exporter, "_incomplete_chapters", [])
-        if incomplete:
-            real = [it for it in incomplete if not it[5]]
-            stable = [it for it in incomplete if it[5]]
-            logging.warning(
-                "Book %s: %d chapter(s) are below the declared length even after "
-                "re-fetching (%d likely real gap, %d probably a declared-count "
-                "difference):"
-                % (book_id, len(incomplete), len(real), len(stable))
+                try:
+                    await exporter.export_markdown(args.load_timeout, args.load_interval)
+                except utils.CookieExpiredError as ex:
+                    logging.error(
+                        "Stopping export: cookie expired or login required (%s)" % ex
+                    )
+                    await page.close()
+                    return 2
+                except utils.LoadChapterFailedError:
+                    logging.warning(
+                        "Load chapter failed (retry %d/%d), close browser and retry"
+                        % (retry_count + 1, max_retries)
+                    )
+                    await page.close()
+                else:
+                    await page.close()
+                    break
+            else:
+                logging.error(
+                    "Book %s export failed after %d retries, giving up" % (book_id, max_retries)
+                )
+                await page.close()
+                continue
+
+            # Surface chapters that only got captured because a page turn stalled
+            # twice (browser restart did not clear it). They are kept so the book
+            # still exports, but they may be short — say so loudly rather than
+            # handing over a silently incomplete book.
+            stalled = sorted(
+                cid for cid, n in getattr(page, "_page_turn_stalls", {}).items() if n > 1
             )
-            for index, title, captured, declared, ratio, is_stable in incomplete:
+            if stalled:
                 logging.warning(
-                    "  chapter %d %s: %d/%d chars (%.0f%%)%s",
-                    index + 1,
-                    title,
-                    captured,
-                    declared,
-                    ratio * 100,
-                    " [unchanged after re-fetch]" if is_stable else " [changed after re-fetch]",
+                    "Book %s: page turn stalled twice in %d chapter(s), kept as captured "
+                    "and they may be INCOMPLETE: %s"
+                    % (book_id, len(stalled), ", ".join(str(c) for c in stalled))
                 )
 
-        # Chapters that used up their restart allowance. The book still exports;
-        # these are the holes in it and must be named, not left to be discovered
-        # by reading the PDF.
-        skipped = getattr(exporter, "_skipped_chapters", [])
-        if skipped:
-            logging.error(
-                "Book %s: %d chapter(s) were SKIPPED after exhausting their restart "
-                "allowance and left as placeholders:" % (book_id, len(skipped))
-            )
-            for title, used, reason in skipped:
-                logging.error("  %s (%d restarts): %s", title, used, reason)
+            # Same idea for chapters that stayed short of WeRead's declared length
+            # even after a re-fetch: exporting them keeps the book usable, but the
+            # gap must not pass unnoticed. A re-fetch that changed the text points at
+            # a real gap; one that changed nothing usually means the declared count
+            # is simply higher than what the page renders.
+            incomplete = getattr(exporter, "_incomplete_chapters", [])
+            if incomplete:
+                real = [it for it in incomplete if not it[5]]
+                stable = [it for it in incomplete if it[5]]
+                logging.warning(
+                    "Book %s: %d chapter(s) are below the declared length even after "
+                    "re-fetching (%d likely real gap, %d probably a declared-count "
+                    "difference):"
+                    % (book_id, len(incomplete), len(real), len(stable))
+                )
+                for index, title, captured, declared, ratio, is_stable in incomplete:
+                    logging.warning(
+                        "  chapter %d %s: %d/%d chars (%.0f%%)%s",
+                        index + 1,
+                        title,
+                        captured,
+                        declared,
+                        ratio * 100,
+                        " [unchanged after re-fetch]" if is_stable else " [changed after re-fetch]",
+                    )
 
-        # Chapters that stayed short through every re-fetch: these are the real
-        # holes in the book, and they must be named rather than left for whoever
-        # reads the PDF to stumble over.
-        unresolved = getattr(exporter, "_unresolved_chapters", [])
-        if unresolved:
-            logging.error(
-                "Book %s: %d chapter(s) could NOT be captured in full and are "
-                "INCOMPLETE:" % (book_id, len(unresolved))
-            )
-            for index, title, captured, declared, ratio in unresolved:
-                if declared:
-                    logging.error(
-                        "  chapter %d %s: only %d/%d chars (%.0f%%)",
-                        index + 1, title, captured, declared, ratio * 100,
-                    )
-                else:
-                    logging.error(
-                        "  chapter %d %s: nothing captured (%d chars written)",
-                        index + 1, title, captured,
-                    )
+            # Chapters that used up their restart allowance. The book still exports;
+            # these are the holes in it and must be named, not left to be discovered
+            # by reading the PDF.
+            skipped = getattr(exporter, "_skipped_chapters", [])
+            if skipped:
+                logging.error(
+                    "Book %s: %d chapter(s) were SKIPPED after exhausting their restart "
+                    "allowance and left as placeholders:" % (book_id, len(skipped))
+                )
+                for title, used, reason in skipped:
+                    logging.error("  %s (%d restarts): %s", title, used, reason)
+
+            # Chapters that stayed short through every re-fetch: these are the real
+            # holes in the book, and they must be named rather than left for whoever
+            # reads the PDF to stumble over.
+            unresolved = getattr(exporter, "_unresolved_chapters", [])
+            if unresolved:
+                logging.error(
+                    "Book %s: %d chapter(s) could NOT be captured in full and are "
+                    "INCOMPLETE:" % (book_id, len(unresolved))
+                )
+                for index, title, captured, declared, ratio in unresolved:
+                    if declared:
+                        logging.error(
+                            "  chapter %d %s: only %d/%d chars (%.0f%%)",
+                            index + 1, title, captured, declared, ratio * 100,
+                        )
+                    else:
+                        logging.error(
+                            "  chapter %d %s: nothing captured (%d chars written)",
+                            index + 1, title, captured,
+                        )
 
         await exporter.pre_process_markdown()
         title = await exporter.get_book_title()
         title = utils.format_filename(title)
 
+        # Everything for one book lives under <output-dir>/<title>/:
+        #   export_summary.json, meta.json, <title>.pdf/.epub/.txt, markdown/
+        book_dir = os.path.join(output_dir, title)
+        if not os.path.isdir(book_dir):
+            os.makedirs(book_dir)
+        logging.info("Book output directory: %s" % book_dir)
+
         # Machine-readable verdict for this book, so an automated driver can tell
         # "finished" from "finished with holes" without re-deriving it from the
         # log. `unresolved` and `skipped` are the real gaps; `declared_count_diff`
         # are chapters where WeRead simply declares more words than it renders.
-        save_path_cache = os.path.join("cache", book_id)
+        summary = None
         try:
             summary = {
                 "book_id": book_id,
@@ -497,32 +638,52 @@ async def async_main():
                     for (i, t, c, d, _r, _s) in getattr(exporter, "_incomplete_chapters", [])
                 ],
             }
-            # encoding is not optional: without it Python uses the locale codec
-            # (GBK on this machine), and check_book reads this file back as
-            # UTF-8 — so every summary was silently unreadable and the gate fell
-            # back to a bare ratio scan without saying so.
-            with open(os.path.join(save_path_cache, "export_summary.json"), "w",
-                      encoding="utf-8") as fp:
-                fp.write(json.dumps(summary, ensure_ascii=False, indent=2))
+            gaps = bool(summary["unresolved"] or summary["skipped"])
+            summary["status"] = "INCOMPLETE" if gaps else "OK"
+            summary["complete"] = not gaps
+            summary["problems"] = []
+            summary["formats"] = {}
+            if plan == "formats":
+                # Chapters were not touched: keep the recorded verdict as is.
+                summary = existing
         except Exception:
-            logging.exception("Could not write export_summary.json for %s" % book_id)
+            logging.exception("Could not build export_summary for %s" % book_id)
+
+        def flush_summary():
+            """Refresh `formats` from disk and rewrite export_summary.json."""
+            if summary is None:
+                return
+            try:
+                summary["formats"] = _scan_formats(book_dir, title)
+                _save_export_summary(summary, book_dir)
+            except Exception:
+                logging.exception("Could not write export_summary.json for %s" % book_id)
+
+        flush_summary()
+
+        try:
+            await exporter.write_book_meta(book_dir)
+        except Exception:
+            logging.exception("Could not write meta.json for %s" % book_id)
 
         if "md" in args.output_format:
-            save_path = os.path.join(output_dir, title)
+            save_path = os.path.join(book_dir, "markdown")
             await exporter.export_markdown_files(save_path)
             logging.info("Save markdown files to %s complete" % save_path)
 
+        flush_summary()
         if "epub" in args.output_format:
-            save_path = os.path.join(output_dir, "%s.epub" % title)
+            save_path = os.path.join(book_dir, "%s.epub" % title)
             if os.path.isfile(save_path):
                 logging.info("File %s exist, ignore export" % save_path)
             else:
                 await exporter.markdown_to_epub(save_path, extra_css=extra_css)
                 logging.info("Save file %s complete" % save_path)
 
+        flush_summary()
         if "pdf" in args.output_format:
             suffix = COMPRESS_PDF_SUFFIX if args.compress_pdf_images else ""
-            save_path = os.path.join(output_dir, "%s%s.pdf" % (title, suffix))
+            save_path = os.path.join(book_dir, "%s%s.pdf" % (title, suffix))
             # Rebuild when the chapters are newer than the PDF. An existing PDF
             # used to be kept unconditionally, which meant a chapter repaired on a
             # retry never made it into the PDF — the md bundle was refreshed and
@@ -554,7 +715,7 @@ async def async_main():
                 except PermissionError:
                     # Windows: the file is open in a viewer. Do not lose the work —
                     # write beside it and say so plainly.
-                    fallback = os.path.join(output_dir, "%s-new.pdf" % title)
+                    fallback = os.path.join(book_dir, "%s-new.pdf" % title)
                     logging.error(
                         "Cannot write %s (open in another program); writing %s instead"
                         % (save_path, fallback)
@@ -569,12 +730,13 @@ async def async_main():
                     )
                     logging.info("Save file %s complete" % fallback)
 
+        flush_summary()
         if "mobi" in args.output_format:
             if sys.platform != "linux":
                 logging.error("Only linux system supported to export mobi format")
                 return -1
-            epub_path = os.path.join(output_dir, "%s.epub" % title)
-            save_path = os.path.join(output_dir, "%s.mobi" % title)
+            epub_path = os.path.join(book_dir, "%s.epub" % title)
+            save_path = os.path.join(book_dir, "%s.mobi" % title)
             if os.path.isfile(save_path):
                 logging.info("File %s exist, ignore export" % save_path)
             else:
@@ -584,19 +746,29 @@ async def async_main():
                     continue
                 logging.info("Save file %s complete" % save_path)
 
+        flush_summary()
         if "txt" in args.output_format:
-            save_path = os.path.join(output_dir, "%s.txt" % title)
+            save_path = os.path.join(book_dir, "%s.txt" % title)
             if os.path.isfile(save_path):
                 logging.info("File %s exist, ignore export" % save_path)
             else:
                 await exporter.markdown_to_txt(save_path)
                 logging.info("Save file %s complete" % save_path)
 
+        flush_summary()
         if not args.no_check:
             from . import check_book
 
-            # Judge cache/<id>/chapters + export_summary only (not output/).
-            check_book.log_result(check_book.check(book_id))
+            # Judge cache/<id>/chapters plus this run's summary (not output/).
+            verdict = check_book.check(book_id, summary=summary)
+            check_book.log_result(verdict)
+            # Fold the conclusion into export_summary.json so the book folder
+            # alone says whether it is complete.
+            if summary is not None and verdict.get("state") in ("OK", "INCOMPLETE"):
+                summary["status"] = verdict["state"]
+                summary["complete"] = verdict["state"] == "OK"
+                summary["problems"] = list(verdict.get("problems") or [])
+                flush_summary()
     return 0
 
 

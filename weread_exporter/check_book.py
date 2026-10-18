@@ -15,12 +15,13 @@ claim mean something.
 How it decides, in order:
 
 1. Every chapter file must exist and none may be a load-failure placeholder.
-2. The exporter's own verdict (`cache/<id>/export_summary.json`) is honoured when
-   present. Only real gaps (`unresolved` / `skipped`) fail the gate;
+2. The exporter's own verdict (`<output-dir>/<title>/export_summary.json`, passed
+   in by the exporter or looked up here; legacy `cache/<id>/` copy as fallback)
+   is honoured when present. Only real gaps (`unresolved` / `skipped`) fail the gate;
    `declared_count_diff` only warns.
 3. Without a summary, fall back to the ratio scan: below hard_ratio fails,
    between hard_ratio and warn_ratio only warns.
-4. Optionally (CLI only) require output/ md bundle or PDF — the exporter itself
+4. Optionally (CLI only) require the output folder's markdown/ or PDF — the exporter itself
    only checks cache/.
 """
 from __future__ import print_function
@@ -51,9 +52,9 @@ def strip_count(text):
     return len(re.sub(r"\s+", "", text))
 
 
-def load_summary(cache_dir):
-    """Load cache/<id>/export_summary.json when present."""
-    path = os.path.join(cache_dir, "export_summary.json")
+def load_summary(directory):
+    """Load <directory>/export_summary.json when present."""
+    path = os.path.join(directory, "export_summary.json")
     if not os.path.isfile(path):
         return None
     try:
@@ -65,12 +66,16 @@ def load_summary(cache_dir):
 def check(book_id, hard_ratio=DEFAULT_HARD_RATIO, warn_ratio=DEFAULT_WARN_RATIO,
           min_words=DEFAULT_MIN_WORDS, min_shortfall=DEFAULT_MIN_SHORTFALL,
           min_shortfall_ratio=DEFAULT_MIN_SHORTFALL_RATIO, root=".",
-          require_pdf=False, require_md=False, pdf_suffix=""):
+          require_pdf=False, require_md=False, pdf_suffix="", output_dir=None, summary=None):
     """Judge whether captured chapters under cache/<id>/ are complete enough.
 
     By default only cache/ is checked (chapter files + export_summary). Set
     require_pdf / require_md to also enforce files under output/ (manual CLI).
     pdf_suffix: e.g. "-compressed" when looking for a compressed PDF.
+    output_dir: deliverables root (default <root>/output); each book lives in
+    <output_dir>/<title>/ with <title>.pdf and markdown/ inside.
+    summary: the exporter's export_summary dict; when omitted it is read from the
+    book folder (legacy cache/<id>/ copy as a last resort).
     """
     cache_dir = os.path.join(root, "cache", book_id)
     meta_path = os.path.join(cache_dir, "meta.json")
@@ -116,14 +121,16 @@ def check(book_id, hard_ratio=DEFAULT_HARD_RATIO, warn_ratio=DEFAULT_WARN_RATIO,
                 % (index + 1, ch_title, got, declared, ratio * 100)
             )
 
-    pdf = os.path.join(root, "output", "%s%s.pdf" % (title, pdf_suffix or ""))
-    bundle = os.path.join(root, "output", title)
+    book_dir = os.path.join(output_dir or os.path.join(root, "output"), title)
+    pdf = os.path.join(book_dir, "%s%s.pdf" % (title, pdf_suffix or ""))
+    bundle = os.path.join(book_dir, "markdown")
     if require_pdf and not os.path.isfile(pdf):
-        problems.append("no PDF at output/%s%s.pdf" % (title, pdf_suffix or ""))
+        problems.append("no PDF at %s" % pdf)
     if require_md and not os.path.isdir(bundle):
-        problems.append("no md bundle at output/%s/" % title)
+        problems.append("no md bundle at %s" % bundle)
 
-    summary = load_summary(cache_dir)
+    if summary is None:
+        summary = load_summary(book_dir) or load_summary(cache_dir)
     if summary:
         for item in summary.get("unresolved", []):
             problems.append(
@@ -251,16 +258,21 @@ def main(argv=None):
         default=DEFAULT_MIN_SHORTFALL_RATIO,
     )
     ap.add_argument("--root", default=".")
+    ap.add_argument(
+        "--output-dir",
+        default=None,
+        help="deliverables root for --require-pdf/--require-md (default <root>/output)",
+    )
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument(
         "--require-pdf",
         action="store_true",
-        help="also require output/<title>.pdf (off by default; cache/ is enough)",
+        help="also require <output-dir>/<title>/<title>.pdf (off by default; cache/ is enough)",
     )
     ap.add_argument(
         "--require-md",
         action="store_true",
-        help="also require output/<title>/ md bundle (off by default)",
+        help="also require <output-dir>/<title>/markdown/ (off by default)",
     )
     ap.add_argument(
         "--pdf-suffix",
@@ -280,6 +292,7 @@ def main(argv=None):
         require_pdf=args.require_pdf,
         require_md=args.require_md,
         pdf_suffix=args.pdf_suffix,
+        output_dir=args.output_dir,
     )
     if r["state"] == "not-started":
         print("NOT-STARTED %s: %s" % (args.book_id, r["reason"]))

@@ -69,6 +69,7 @@ python -m venv .venv
 - 每种格式单独写一次 `-o`（不要写成 `-o md pdf`）。
 - 章节原文仍在仓库 `cache/<book_id>/chapters/`；成品目录默认 `output/`，可用 `--output-dir` 改（如 `Z:\share\books`）。
 - 运行日志默认写到 `logs/<book_id>.run.log`（UTF-8）；浏览器控制台在 `logs/<book_id>.log`。
+- 启动一本书时，先看 `<输出目录>/<书名>/export_summary.json` 决定做什么：没有该文件或 `complete` 不为 true → 完整下载；已完整但缺少所要求的格式（看 `formats`）→ 不开浏览器，直接用 `cache/` 生成缺的格式（`cache/` 章节不完好则回退为完整下载）；已完整且格式齐全 → 直接跳过。加 `--force` 可忽略并重新下载。
 - 每本导完会自动校验 `cache/` 完整性并打印结论；跳过校验加 `--no-check`。
 - 单独复查：`.\.venv\Scripts\python.exe -m weread_exporter.check_book <book_id>`
 - 运行中若 cookie 失效会打 ERROR 并以退出码 `2` 结束（**不会**再等扫码）：启动时用户接口验失败、页脚「登录」、或 canvas 一直不出时探针到登录按钮/用户接口拒绝（不扫正文，避免书中「未登录」误杀）。普通章节抓取失败仍走重试。更新 `cache/cookie.txt` 或加 `--force-login` 后重跑即可续抓。
@@ -96,15 +97,29 @@ https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88
 
 通过 `-o / --output-format` 指定，可重复多次以同时导出多种格式。取值：`md`、`epub`、`pdf`、`mobi`、`txt`，默认 `epub`。
 
+每本书输出到 `<输出目录>/<书名>/`：
+
+```
+<书名>/
+├── export_summary.json   # 整本书的导出状态（status / complete / unresolved / skipped …）
+├── meta.json             # 书名、作者、章节目录（无 cover URL）
+├── <书名>.pdf            # -o pdf
+├── <书名>.epub / .mobi / .txt   # 对应格式
+└── markdown/             # -o md
+    ├── chapters/
+    ├── images/
+    └── cover.jpg
+```
+
 | 格式 | 产物 | 说明 |
 | --- | --- | --- |
-| `md` | `output/<书名>/` 目录 | 含 `chapters/`、`images/`、`cover.jpg`、`meta.json`（无 cover URL） |
-| `epub` | `output/<书名>.epub` | 适合手机端访问 |
-| `pdf` | `output/<书名>.pdf` | 适合电脑端访问 |
-| `mobi` | `output/<书名>.mobi` | 适合 Kindle 访问；**仅 Linux 支持**（依赖内置 kindlegen），会同时生成 epub |
-| `txt` | `output/<书名>.txt` | 纯文本 |
+| `md` | `<书名>/markdown/` | 含 `chapters/`、`images/`、`cover.jpg` |
+| `epub` | `<书名>/<书名>.epub` | 适合手机端访问 |
+| `pdf` | `<书名>/<书名>.pdf` | 适合电脑端访问 |
+| `mobi` | `<书名>/<书名>.mobi` | 适合 Kindle 访问；**仅 Linux 支持**（依赖内置 kindlegen），会同时生成 epub |
+| `txt` | `<书名>/<书名>.txt` | 纯文本 |
 
-成品默认写在当前目录下的 `output/`，可用 `--output-dir` 指定。若目标文件已存在，则跳过该格式（不覆盖已有文件）。
+`meta.json` 与 `export_summary.json` 无论选哪种格式都会写入书目录。`export_summary.json` 是单一事实来源：`formats` 记录已导出的格式，`status`（`OK` / `INCOMPLETE`）与 `complete` 表示是否完整，`problems` 列出缺口；批量脚本只读它来判断“是否已导出 / 是否完整 / 有哪些格式”，不再探测文件。成品默认写在当前目录下的 `output/`，可用 `--output-dir` 指定。若目标文件已存在，则跳过该格式（不覆盖已有文件）。
 
 ### 命令行参数
 
@@ -126,6 +141,7 @@ https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88
 | `--pdf-image-max-side` | `1000` | 配合上一个参数：图片长边上限（像素，0 表示不缩放） |
 | `--pdf-image-colors` | `256` | 配合上一个参数：调色板颜色数（0 表示保留真彩） |
 | `--log-file` | `logs/<book-id>.run.log` | UTF-8 运行日志路径 |
+| `--force` | 关闭 | 忽略 `export_summary.json`，强制完整重新下载 |
 | `--no-check` | 关闭 | 跳过导完后的 cache 完整性校验 |
 
 ### 批量导出整个类目
@@ -145,8 +161,8 @@ https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88
 
 - 书单来自 `https://weread.qq.com/web/bookListInCategory/<类目ID>?maxIndex=N`，每页 20 本。接口的 `totalCount` 是该类目下的全部藏书数（财经类 13873），但**列表只开放到有限深度**（实测 1100001 停在约 500 本），脚本以实际能翻到的为准。
 - 书单里的 `bookId` 是数字 ID，导出要用的是 `readerLink` 末尾的编码 ID（如 `95332ad0813ab8705g016ce7`）——脚本自动转换。
-- **可续跑**：成品目录里已有「同名 md 包 + 同名 PDF」的书直接跳过，重跑同一条命令就从上次停下的地方继续。
-- 每本导完打印一行进度（用时、校验结论、预计剩余）；完整记录在 `logs/batch-category-<类目ID>.run.log`，逐本状态在 `cache/batch-category-<类目ID>.json`。
+- **可续跑、无自有状态**：脚本只调用导出器，是否已导出/是否完整/缺哪些格式全看 `<成品目录>/<书名>/export_summary.json`；已完整且 md+pdf 齐全的书直接跳过，重跑同一条命令就从上次停下的地方继续。`--list-only` 会列出每本当前的处理方式（download / formats / skip）。
+- 每本导完打印一行结论（以 export_summary 的 status 为准）；完整记录在 `logs/batch-category-<类目ID>.run.log`。
 - cookie 失效时整批停止（退出码 `2`），不会一本一本空转；更新 `cache/cookie.txt` 后重跑即可。
 - 连续 3 本失败会自动停手，避免整批空转（`--max-consecutive-failures`）。
 - 单本总超时默认 4 小时（`--book-timeout`），单本失败默认重试 1 次（`--retries`）。

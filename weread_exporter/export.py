@@ -516,18 +516,24 @@ class WeReadExporter(object):
                     % (self.__class__.__name__, name)
                 )
 
-        # Deliver a meta.json for the md bundle (title/author/chapters), but omit
-        # the remote cover URL — the local cover.jpg beside it is enough.
+        # Copy cover.jpg if exists (meta.json lives in the book root, see
+        # write_book_meta — not inside the markdown folder).
+        if os.path.isfile(self._cover_image_path):
+            shutil.copy(self._cover_image_path, output_dir)
+
+    async def write_book_meta(self, book_dir):
+        """Write meta.json into the book's root folder, without the remote cover URL.
+
+        The local cover.jpg is delivered under markdown/; the CDN URL is noise.
+        """
         meta_data = await self._load_meta_data()
         meta_for_bundle = {
             key: value for key, value in meta_data.items() if key != "cover"
         }
-        with open(os.path.join(output_dir, "meta.json"), "w", encoding="utf-8") as fp:
+        if not os.path.isdir(book_dir):
+            os.makedirs(book_dir)
+        with open(os.path.join(book_dir, "meta.json"), "w", encoding="utf-8") as fp:
             fp.write(json.dumps(meta_for_bundle, ensure_ascii=False, indent=2))
-
-        # Copy cover.jpg if exists
-        if os.path.isfile(self._cover_image_path):
-            shutil.copy(self._cover_image_path, output_dir)
 
     async def markdown_to_epub(self, save_path, extra_css=None):
         meta_data = await self._load_meta_data()
