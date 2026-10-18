@@ -661,6 +661,34 @@ async def async_main():
 
         flush_summary()
 
+        # Judge completeness BEFORE producing any deliverable: an incomplete book
+        # gets no md/pdf/epub/txt/mobi (and no meta.json) — only export_summary.json
+        # recording what is missing, so nothing half-finished is handed over.
+        if not args.no_check:
+            from . import check_book
+
+            # Judge cache/<id>/chapters plus this run's summary (not output/).
+            verdict = check_book.check(book_id, summary=summary)
+            check_book.log_result(verdict)
+            if summary is not None and verdict.get("state") in ("OK", "INCOMPLETE"):
+                summary["status"] = verdict["state"]
+                summary["complete"] = verdict["state"] == "OK"
+                summary["problems"] = list(verdict.get("problems") or [])
+        if summary is not None and not summary.get("complete"):
+            flush_summary()
+            logging.error(
+                "Book %s is INCOMPLETE (%d problem(s)); no output formats were "
+                "exported. Details in %s. Re-run to resume the missing chapters."
+                % (
+                    book_id,
+                    len(summary.get("problems") or []) or len(summary.get("unresolved") or [])
+                    + len(summary.get("skipped") or []),
+                    os.path.join(book_dir, "export_summary.json"),
+                )
+            )
+            continue
+        flush_summary()
+
         try:
             await exporter.write_book_meta(book_dir)
         except Exception:
@@ -756,19 +784,6 @@ async def async_main():
                 logging.info("Save file %s complete" % save_path)
 
         flush_summary()
-        if not args.no_check:
-            from . import check_book
-
-            # Judge cache/<id>/chapters plus this run's summary (not output/).
-            verdict = check_book.check(book_id, summary=summary)
-            check_book.log_result(verdict)
-            # Fold the conclusion into export_summary.json so the book folder
-            # alone says whether it is complete.
-            if summary is not None and verdict.get("state") in ("OK", "INCOMPLETE"):
-                summary["status"] = verdict["state"]
-                summary["complete"] = verdict["state"] == "OK"
-                summary["problems"] = list(verdict.get("problems") or [])
-                flush_summary()
     return 0
 
 

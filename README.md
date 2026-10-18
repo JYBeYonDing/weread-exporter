@@ -69,7 +69,7 @@ python -m venv .venv
 - 每种格式单独写一次 `-o`（不要写成 `-o md pdf`）。
 - 章节原文仍在仓库 `cache/<book_id>/chapters/`；成品目录默认 `output/`，可用 `--output-dir` 改（如 `Z:\share\books`）。
 - 运行日志默认写到 `logs/<book_id>.run.log`（UTF-8）；浏览器控制台在 `logs/<book_id>.log`。
-- 启动一本书时，先看 `<输出目录>/<书名>/export_summary.json` 决定做什么：没有该文件或 `complete` 不为 true → 完整下载；已完整但缺少所要求的格式（看 `formats`）→ 不开浏览器，直接用 `cache/` 生成缺的格式（`cache/` 章节不完好则回退为完整下载）；已完整且格式齐全 → 直接跳过。加 `--force` 可忽略并重新下载。
+- 启动一本书时，先看 `<输出目录>/<书名>/export_summary.json` 决定做什么：没有该文件或 `complete` 不为 true → 完整下载；已完整但缺少所要求的格式（看 `formats`）→ 不开浏览器，直接用 `cache/` 生成缺的格式（`cache/` 章节不完好则回退为完整下载）；已完整且格式齐全 → 直接跳过。加 `--force` 可忽略并重新下载。**下载不完整时不导出任何格式**（也不写 `meta.json`），只在书目录写 `export_summary.json` 记录缺口，重跑即可续抓缺失章节。
 - 每本导完会自动校验 `cache/` 完整性并打印结论；跳过校验加 `--no-check`。
 - 单独复查：`.\.venv\Scripts\python.exe -m weread_exporter.check_book <book_id>`
 - 运行中若 cookie 失效会打 ERROR 并以退出码 `2` 结束（**不会**再等扫码）：启动时用户接口验失败、页脚「登录」、或 canvas 一直不出时探针到登录按钮/用户接口拒绝（不扫正文，避免书中「未登录」误杀）。普通章节抓取失败仍走重试。更新 `cache/cookie.txt` 或加 `--force-login` 后重跑即可续抓。
